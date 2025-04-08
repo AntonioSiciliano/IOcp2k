@@ -16,10 +16,10 @@ def test():
     # 
     cond.plot_current_current_correlation_function()
     # 
-    cond.test_implementation()
+    # cond.test_implementation()
 
-    # cond.test_implementation2()
-    cond.plot_sigma()
+    cond.test_implementation2()
+    # cond.plot_sigma()
 
     # print(cond.V)
     # print(np.sqrt(np.sum((cond.volumes - cond.V)**2))/np.sqrt(cond.N))
