@@ -244,8 +244,37 @@ class Conductivity:
             
         return J_all
 
+    def get_time_correlation_fft(self):
+        """
+        RETURN THE TIME CORREALTION FUNCTION USING FFT
+        ==============================================
+        ======
+        """
+        # Duplicate in size but set all zeros
+        new_js = np.zeros((2 * self.N, 3), dtype = type(self.js[0,0]))
+        # Set the inital values and the others will be zeros
+        new_js[:self.N,:] = self.js[:,:]
+        
+        # The J J correlation in Fourier
+        J_omega  = scipy.fft.fft(new_js[:,:], axis = 0)
+        
+        # Get the modulus squre and perform the dot product
+        J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
+        
+        # Perform the inverse Fourier transform
+        C_t = scipy.fft.ifft(J2_omega)
 
-    def get_current_current_correlation_function(self):
+        # Check the imaginary part
+        if np.imag(C_t).max() > 1e-5:
+            print("Discarting imaginary part...")
+        # Apply the normalization
+        normalization = np.arange(self.N, 0, -1)
+        
+        C_t_real = np.real(C_t)[:self.N] /normalization
+        
+        return C_t_real
+
+    def get_current_current_correlation_function(self, use_julia = True):
         """
         GET THE CURRENT CURRENT AUTOCORRELATION FUNCTION
         ================================================
@@ -253,10 +282,14 @@ class Conductivity:
         # Range on all the snapshots to get the currents
         for i in range(self.N):
             self.js[i,:], self.volumes[i] = self.get_current_from_ase_atoms(i, return_volume = True)
-    
-        # Get the julia windowed average (BRUTE FORCE)
-        self.correlations, self.error_correlations = Main.get_time_correlation_vector(self.js, self.N)
 
+        if use_julia and __JULIA__:
+            # Get the julia windowed average (BRUTE FORCE)
+            self.correlations, self.error_correlations = Main.get_time_correlation_vector(self.js, self.N)
+        else:
+            pass
+            # self.correlations, self.error_correlations = self.get_time_correlation_fft()
+    
         self.V = np.average(self.volumes)
 
 
@@ -336,37 +369,37 @@ class Conductivity:
         plt.show()
 
 
-    # def test_implementation2(self):
-    #     """
-    #     A TEST FUNCTION
-    #     ===============
-    #     """
-    #     new_js = np.zeros((2 * self.N, 3))
-    #     new_js[:self.N,:] = self.js[:,:]
-    #     # The J J correlation in Fourier
-    #     J_omega  = scipy.fft.fft(new_js[:,:], axis = 0)
+    def test_implementation2(self):
+        """
+        A TEST FUNCTION
+        ===============
+        """
+        new_js = np.zeros((2 * self.N, 3))
+        new_js[:self.N,:] = self.js[:,:]
+        # The J J correlation in Fourier
+        J_omega  = scipy.fft.fft(new_js[:,:], axis = 0)
 
-    #     # Get the square
-    #     J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
-    #     C_t = scipy.fft.ifft(J2_omega)
+        # Get the square
+        J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
+        C_t = scipy.fft.ifft(J2_omega)
     
-    #     if np.imag(C_t).max() > 1e-5:
-    #         print("Discarting imaginary part...")
-    #     normalization = np.arange(self.N, 0, -1)
-    #     C_t_real = np.real(C_t[:self.N]) /normalization
+        if np.imag(C_t).max() > 1e-5:
+            print("Discarting imaginary part...")
+        normalization = np.arange(self.N, 0, -1)
+        C_t_real = np.real(C_t[:self.N]) /normalization
     
-    #     matplotlib.use('tkagg')
-    #     # Create base plot
-    #     fig, ax1 = plt.subplots()
+        matplotlib.use('tkagg')
+        # Create base plot
+        fig, ax1 = plt.subplots()
         
-    #     ax1.errorbar(self.t, self.correlations, yerr = self.error_correlations, lw = 3, color = "k", label = "Julia")
-    #     ax1.legend()
+        ax1.errorbar(self.t, self.correlations, yerr = self.error_correlations, lw = 3, color = "k", label = "Julia")
+        ax1.legend()
         
-    #     ax2 = ax1.twinx()
-    #     mask = self.t < self.t[-1]/2
-    #     ax2.plot(self.t[mask], C_t_real[mask], color = 'red', label = "python Fourier")
-    #     ax2.legend(loc = 'upper left')
-    #     plt.show()
+        ax2 = ax1#.twinx()
+        mask = self.t < self.t[-1]/2
+        ax2.plot(self.t, C_t_real, color = 'red', label = "python Fourier")
+        ax2.legend(loc = 'upper left')
+        plt.show()
 
 
         
@@ -374,18 +407,24 @@ class Conductivity:
         """
         A TEST FUNCTION
         ===============
-        """
 
+        We compare the result of the windowed average in julia with FFT of python
+        """
         # The J J correlation in Fourier
         J_omega  = scipy.fft.fft(self.js[:,:], axis = 0)
-        # Get the modulus sqaure and perform the dot product
+        
+        # Get the modulus squre and perform the dot product
         J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
+        
         # Perform the inverse Fourier transform
         C_t = scipy.fft.ifft(J2_omega)
-    
+
+        # Check the imaginary part
         if np.imag(C_t).max() > 1e-5:
-            print("Discarting imaginary part...")
+            raise ValueError("Discarting imaginary part...")
+        # Apply the normalization
         normalization = np.arange(self.N, 0, -1)
+        # Get the final result
         C_t_real = np.real(C_t) /normalization
     
         matplotlib.use('tkagg')
