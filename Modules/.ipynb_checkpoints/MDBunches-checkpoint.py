@@ -1,8 +1,9 @@
 import numpy as np
 import ase
-from matplotlib.ticker import MaxNLocator
+# from matplotlib.ticker import MaxNLocator
 from ase import Atoms
 import os, sys
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import AtomicSnap
@@ -44,7 +45,8 @@ class AtomicBunches:
         # int 0=False 1=True
         self.restart = False
         self.restart_file = None
-
+        # self.restart_from_nvt = Fas
+        self.local_path = None
         ###########
         # CLUSTER #
         ###########
@@ -107,7 +109,7 @@ module load cp2k/2024.3\n
                           # THE SMOOTHING OF THE DENSITY
                           "_USE_SMOOTH_" : 1, "_XC_SMOOTH_RHO_" : "NN50", "_XC_DERIV_" :  "NN50_SMOOTH",
                           # CUTOFF in RYDBERG AND NUMBER OF GRIDS
-                          "_CUTOFF_" : 400, "_REL_CTOFF_" : 60, "_NGRIDS_" : 4, 
+                          "_CUTOFF_" : 600, "_REL_CTOFF_" : 60, "_NGRIDS_" : 4, 
                           # GPAW
                           "_USE_GPAW_" : 1,
                           # THE PARAMETERS OF THE STRUCTURE in ANGSTROM (IF RESTART IS 1 then this is override)
@@ -119,9 +121,13 @@ module load cp2k/2024.3\n
                           # MD STEPS dt in FEMPTOSECONDS
                           "_TIMESTEP_" : 0.5, "_STEPS_" : 1,
                           # THERMOSTAT T in KELVIN and TIMECONSTANT IN FEMPTOSECOND
-                          "_TEMPERATURE_" : 673, "_TIMECONCSVR_" : 100,
-                          # BAROSTAT in BAR: NPT_I
-                          "_PRESSURE_" : 1500, "_CONPRESS_" : 100}
+                          "_TEMPERATURE_" : None, "_TIMECONCSVR_" : None,
+                          # BAROSTAT PRESSURE in BAR TIME OCNSTANT in FEMPTOSECOND: NPT_I 
+                          "_PRESSURE_" : None, "_TIMECONCONPRESS_" : None,
+                          # POLARIZATION
+                          "_USE_BERRY_" : 0,
+                          # COMPUTE HOMO LUMO GAPS EVERY STEPS
+                          "_N_HL_GAL_PRINT_" : 200}
         
 
         # tHIS IS SET TO TRUE AFTER CALLING initialize
@@ -172,6 +178,9 @@ module load cp2k/2024.3\n
         if "NPT" in self.cp2k_dict["_CALCTYPE_"] and bool(self.cp2k_dict["_USE_SMOOTH_"]):
             raise ValueError("The smoothing procedure to get the pressure should be tested")
 
+        if "NVT" in self.cp2k_dict["_CALCTYPE_"] and not bool(self.cp2k_dict["_USE_SMOOTH_"]):
+            raise ValueError("In NVT considering the smoothing procedure")
+
         if not ".xyz" in self.structure_file:
             raise ValueError("Please use a xyz file structure in Angstrom")
 
@@ -194,6 +203,8 @@ module load cp2k/2024.3\n
 @SET VDW            _VDW_
 @SET USE_SMOOTH     _USE_SMOOTH_
 @SET USE_GPAW       _USE_GPAW_
+@SET PRINT_P_BERRY  _USE_BERRY_
+@SET PRINT_HL_GAP   _N_HL_GAL_PRINT_
         
 &GLOBAL
   PROJECT     ${SYSTEM}
@@ -222,9 +233,9 @@ module load cp2k/2024.3\n
       @IF ${USE_GPAW}
           METHOD GAPW          # Gaussian Augumented Plane Waves
           QUADRATURE   GC_LOG  # Algorithm to construct the atomic radial grid for GAPW
-          EPSFIT       1.E-4   # Precision to give the extension of a hard gaussian
+          EPSFIT       1.E-6   # Precision to give the extension of a hard gaussian
           EPSISO       1.0E-12 # Precision to determine an isolated projector
-          EPSRHO0      1.E-6   # Precision to determine the range of V(rho0-rho0soft)
+          EPSRHO0      1.E-8   # Precision to determine the range of V(rho0-rho0soft)
           # LMAXN0       4
           # LMAXN1       6
           # ALPHA0_H     10 # Exponent for hard compensation charge
@@ -271,7 +282,7 @@ module load cp2k/2024.3\n
           PARAMETER_FILE_NAME ${BASIS_POT_PATH}/dftd3.dat
           VERBOSE_OUTPUT .TRUE.
           REFERENCE_FUNCTIONAL PBE
-          # R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
+          R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
           # EPS_CN 1.0E-6 #def=1e-6
           D3_EXCLUDE_KIND 3 # Exclude the Na atom
         &END PAIR_POTENTIAL
@@ -283,12 +294,25 @@ module load cp2k/2024.3\n
     &PRINT
         &MO_CUBES
             &EACH
-              MD  200
+              MD  ${PRINT_HL_GAP}
             &END EACH
             NHOMO        2
             NLUMO       10
             WRITE_CUBE   FALSE
         &END MO_CUBES
+
+        @IF ${PRINT_P_BERRY}
+        &MOMENTS ON
+            COMMON_ITERATION_LEVELS 20000
+            FILENAME =${SYSTEM}-1.dipoles
+            ADD_LAST NUMERIC
+            REFERENCE COM
+            &EACH
+              MD 1
+            &END EACH
+        &END MOMENTS
+        @ENDIF
+        
     &END PRINT
 
   &END DFT
@@ -313,7 +337,7 @@ module load cp2k/2024.3\n
 
 &MOTION
   &MD
-    ENSEMBLE      NVT
+    ENSEMBLE      _CALCTYPE_
     STEPS             _STEPS_
     TIMESTEP [fs]     _TIMESTEP_
     TEMPERATURE [K]   _TEMPERATURE_
@@ -341,6 +365,13 @@ module load cp2k/2024.3\n
         MD 1
       &END EACH
     &END FORCES
+
+    &VELOCITIES SILENT
+    	FILENAME =${SYSTEM}-1.vel
+        &EACH
+            MD 1
+        &END EACH
+    &END VELOCITIES
     
     &RESTART
       FILENAME =${SYSTEM}-1.restart
@@ -369,13 +400,6 @@ module load cp2k/2024.3\n
 &END EXT_RESTART
 @endif
             """
-        
-        # for key in dictionary.keys():
-        #     print("{} => {}".format(key, dictionary[key]))
-        #     try:
-        #         input_text.replace(key, "{}".format(dictionary[key]))
-        #     except:
-        #         print("No key {} found".format(key))
 
         def is_all_upper(s):
             return s.isupper() and len(s) > 0
@@ -383,7 +407,256 @@ module load cp2k/2024.3\n
         for key, value in dictionary.items():
             # if is_all_upper(key):
             print(f"{key} => {value}")
+            pre_input_text = copy.deepcopy(input_text)
             input_text = input_text.replace(key, "{}".format(value))
+            if input_text == pre_input_text and not(key in ["_full_RES_FILE_", "_PRESSURE_", "_TIMECONCONPRESS_"]):
+                raise ValueError("KEY {} NOT FOUND, please check the text of the cp2k calculation".format(key))
+        
+        file = open("input.inp", "w")
+        file.write(input_text)
+        file.close()
+
+
+    def create_inp_cp2k_npt(self, dictionary):
+        """
+        CREATE THE INPUT FOR NPT SIMULATIONS in CP2K
+        """
+        
+        input_text = """@SET RESTART        _RESTART_
+
+@SET BASIS_POT_PATH _BASIS_POT_PATH_
+@SET SYSTEM         _SYSTEM_
+@SET VDW            _VDW_
+@SET USE_SMOOTH     _USE_SMOOTH_
+@SET USE_GPAW       _USE_GPAW_
+@SET PRINT_P_BERRY  _USE_BERRY_
+@SET PRINT_HL_GAP   _N_HL_GAL_PRINT_
+        
+&GLOBAL
+  PROJECT     ${SYSTEM}
+  RUN_TYPE    MD
+  PRINT_LEVEL LOW
+  FLUSH_SHOULD_FLUSH 
+&END GLOBAL
+
+&FORCE_EVAL
+
+  METHOD QuickStep
+  STRESS_TENSOR ANALYTICAL
+
+  &DFT
+    BASIS_SET_FILE_NAME ${BASIS_POT_PATH}/GTH_BASIS_SETS
+    POTENTIAL_FILE_NAME ${BASIS_POT_PATH}/GTH_POTENTIALS
+    &MGRID
+      CUTOFF [Ry]       _CUTOFF_
+      NGRIDS            _NGRIDS_
+      REL_CUTOFF [Ry]   _REL_CTOFF_
+    &END MGRID
+
+    &QS
+      EPS_DEFAULT 1.0E-14    # def=1.0E-10
+      EXTRAPOLATION ASPC     #Extrapolation strategy for the wavefunction during MD
+      #EXTRAPOLATION_ORDER 3 #Default is 3
+      @IF ${USE_GPAW}
+          METHOD GAPW          # Gaussian Augumented Plane Waves
+          QUADRATURE   GC_LOG  # Algorithm to construct the atomic radial grid for GAPW
+          EPSFIT       1.E-6   # Precision to give the extension of a hard gaussian
+          EPSISO       1.0E-12 # Precision to determine an isolated projector
+          EPSRHO0      1.E-8   # Precision to determine the range of V(rho0-rho0soft)
+          # LMAXN0       4
+          # LMAXN1       6
+          # ALPHA0_H     10 # Exponent for hard compensation charge
+      @ENDIF
+    &END QS
+
+    &SCF
+      EPS_SCF 1.0E-7 # def=1.0E-5 the exponent should be half of EPS_DEFAULT
+      MAX_SCF 50   # def=50
+      &OUTER_SCF
+        EPS_SCF 1.0E-7 # def=1.0E-5
+        MAX_SCF 50
+      &END OUTER_SCF
+      &OT
+        PRECONDITIONER FULL_SINGLE_INVERSE
+        MINIMIZER DIIS
+      &END OT
+    &END SCF
+
+    &XC
+
+      &XC_FUNCTIONAL PBE
+          &PBE
+                PARAMETRIZATION REVPBE
+          &END PBE
+      &END XC_FUNCTIONAL
+      
+      @IF ${USE_SMOOTH}
+      &XC_GRID
+         XC_SMOOTH_RHO  _XC_SMOOTH_RHO_
+         XC_DERIV       _XC_DERIV_
+      &END XC_GRID
+      @ENDIF
+        
+      @IF ${VDW}
+      &vdW_POTENTIAL
+        DISPERSION_FUNCTIONAL PAIR_POTENTIAL
+        &PAIR_POTENTIAL
+          TYPE DFTD3
+          CALCULATE_C9_TERM .TRUE. # Include the 3-body term
+          REFERENCE_C9_TERM .TRUE. #
+          # KIND_COORDINATION_NUMBERS   1 2
+          #LONG_RANGE_CORRECTION .TRUE.
+          PARAMETER_FILE_NAME ${BASIS_POT_PATH}/dftd3.dat
+          VERBOSE_OUTPUT .TRUE.
+          REFERENCE_FUNCTIONAL PBE
+          R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
+          # EPS_CN 1.0E-6 #def=1e-6
+          D3_EXCLUDE_KIND 3 # Exclude the Na atom
+        &END PAIR_POTENTIAL
+      &END vdW_POTENTIAL
+      @ENDIF
+
+    &END XC
+
+    &PRINT
+        &MO_CUBES
+            &EACH
+              MD  ${PRINT_HL_GAP}
+            &END EACH
+            NHOMO        2
+            NLUMO       10
+            WRITE_CUBE   FALSE
+        &END MO_CUBES
+
+        @IF ${PRINT_P_BERRY}
+        &MOMENTS ON
+            COMMON_ITERATION_LEVELS 20000
+            FILENAME =${SYSTEM}-1.dipoles
+            ADD_LAST NUMERIC
+            REFERENCE COM
+            &EACH
+              MD 1
+            &END EACH
+        &END MOMENTS
+        @ENDIF
+        
+    &END PRINT
+
+  &END DFT
+
+  &SUBSYS
+
+    &CELL
+      ABC [angstrom]     _A_ _B_ _C_
+    &END CELL
+
+    &TOPOLOGY
+      CONNECTIVITY OFF
+      COORD_FILE_FORMAT _COORD_FILE_FORMAT_
+      COORD_FILE_NAME   ./_COORD_FILE_NAME_
+    &END TOPOLOGY
+
+    _KINDS_BASIS_SET_
+
+  &END SUBSYS
+
+&END FORCE_EVAL
+
+&MOTION
+  &MD
+    ENSEMBLE      _CALCTYPE_
+    STEPS             _STEPS_
+    TIMESTEP [fs]     _TIMESTEP_
+    TEMPERATURE [K]   _TEMPERATURE_
+    &THERMOSTAT
+      TYPE CSVR
+      &CSVR
+        TIMECON [fs]  _TIMECONCSVR_
+      &END CSVR
+    &END THERMOSTAT
+    &BAROSTAT
+	   PRESSURE [bar]  _PRESSURE_
+       TIMECON  [fs]   _TIMECONCONPRESS_
+    &END BAROSTAT
+  &END MD
+
+  # COMVEL_TOL 1.0E-12 # Not good if we need to compute conductivity
+
+  &PRINT
+    &TRAJECTORY  SILENT
+      FILENAME =${SYSTEM}-1.xyz
+      &EACH
+        MD 1
+      &END EACH
+    &END TRAJECTORY
+
+    &FORCES  SILENT
+      FILENAME =${SYSTEM}-1.force
+      &EACH
+        MD 1
+      &END EACH
+    &END FORCES
+
+    &VELOCITIES SILENT
+    	FILENAME =${SYSTEM}-1.vel
+        &EACH
+            MD 1
+        &END EACH
+    &END VELOCITIES
+
+    &CELL  SILENT
+      FILENAME =${SYSTEM}-1.cell_xyz
+      &EACH
+        MD 1
+      &END EACH
+    &END CELL
+
+    &STRESS SILENT
+    	FILENAME =${SYSTEM}-1.stress
+        &EACH
+            MD 1
+        &END EACH
+    &END STRESS
+    
+    &RESTART
+      FILENAME =${SYSTEM}-1.restart
+      &EACH
+        MD 1
+      &END EACH
+    &END RESTART
+    
+    &RESTART_HISTORY SILENT
+      &EACH
+        MD 50
+      &END EACH
+    &END RESTART_HISTORY
+  &END PRINT
+
+&END MOTION
+
+@if ${RESTART}
+&EXT_RESTART
+  RESTART_FILE_NAME _RES_FILE_
+  RESTART_COUNTERS    T
+  RESTART_AVERAGES    T
+  RESTART_POS         T
+  RESTART_VEL         T
+  RESTART_THERMOSTAT  T
+  RESTART_BAROSTAT    T
+&END EXT_RESTART
+@endif
+            """
+
+        def is_all_upper(s):
+            return s.isupper() and len(s) > 0
+
+        for key, value in dictionary.items():
+            # if is_all_upper(key):
+            print(f"{key} => {value}")
+            pre_input_text = copy.deepcopy(input_text)
+            input_text = input_text.replace(key, "{}".format(value))
+            if input_text == pre_input_text and not(key in ["_full_RES_FILE_"]):
+                raise ValueError("KEY {} NOT FOUND, please check the text of the cp2k calculation".format(key))
 
         
         file = open("input.inp", "w")
@@ -473,6 +746,12 @@ module load cp2k/2024.3\n
             execution_dir =  "BATCH_{:d}_MD_T_{:d}_steps_{:d}_dt_{:.1f}_".format(batch, self.cp2k_dict["_TEMPERATURE_"],
                                                                                  self.cp2k_dict["_STEPS_"],
                                                                                  self.cp2k_dict["_TIMESTEP_"])
+            if self.cp2k_dict["_CALCTYPE_"] == "NPT_I":
+                execution_dir =  "BATCH_{:d}_MD_T_{:d}_P_{:d}_steps_{:d}_dt_{:.1f}_".format(batch, self.cp2k_dict["_TEMPERATURE_"],
+                                                                                            self.cp2k_dict["_PRESSURE_"],
+                                                                                            self.cp2k_dict["_STEPS_"],
+                                                                                            self.cp2k_dict["_TIMESTEP_"])
+                
             # Add the structure file without the extension
             execution_dir += os.path.basename(self.structure_file)[:-4] 
             execution_dir_list.append(execution_dir)
@@ -483,9 +762,15 @@ module load cp2k/2024.3\n
             if batch == self.n_batches_min:
                 # Update this variable of cp2k dictionary
                 print('Hello! This is batch {} we will start the calculation from\nFILE={}'.format(self.n_batches_min, self.restart_file))
-                SURE = input('Are you ok with this decision? YES or NO')
+                SURE = input('Are you ok with this decision? YES or NO ')
                 if SURE == "NO":
-                    raise ValueError("The creation of the batches has been killed!")
+                    raise ValueError("The restart file is wrong according to you! The creation of the batches has been killed!")
+                
+                # Check if the scratch directory is ok
+                print('The scratch directory will be\n{}'.format(self.cluster_dict["cluster_scratch"]))
+                SURE_scratch = input('Are you ok with this decision? YES or NO ')
+                if SURE_scratch == "NO":
+                    raise ValueError("The scratch dir is not correct according to you! The creation of the batches has been killed!")
                 self.cp2k_dict["_RESTART_"]       = int(np.copy(self.restart))
                 self.cp2k_dict["_full_RES_FILE_"] = copy.deepcopy(self.restart_file)
  
@@ -493,7 +778,8 @@ module load cp2k/2024.3\n
             else:
                 # Update this variable of cp2k dictionary
                 self.cp2k_dict["_RESTART_"]       = 1
-                self.cp2k_dict["_full_RES_FILE_"] = os.path.join(self.cluster_dict["cluster_scratch"], execution_dir_list[-2])
+                # self.cp2k_dict["_full_RES_FILE_"] = os.path.join(self.cluster_dict["cluster_scratch"], execution_dir_list[-2])
+                self.cp2k_dict["_full_RES_FILE_"] = os.path.join(self.local_path, execution_dir_list[-2])
            
             
             # Create the execution dir
@@ -513,8 +799,10 @@ module load cp2k/2024.3\n
              
 
             # Create the cp2k input
-            if self.cp2k_dict["_CALCTYPE_"] == "NVT":
+            if   self.cp2k_dict["_CALCTYPE_"] == "NVT":
                 self.create_inp_cp2k_nvt(self.cp2k_dict)
+            elif self.cp2k_dict["_CALCTYPE_"] == "NPT_I":
+                self.create_inp_cp2k_npt(self.cp2k_dict)
             else:
                 raise NotImplementedError("NPT is not yey implemented")
         

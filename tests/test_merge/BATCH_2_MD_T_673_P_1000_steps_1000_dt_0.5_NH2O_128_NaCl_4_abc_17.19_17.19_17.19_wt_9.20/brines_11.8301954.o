@@ -1,0 +1,32 @@
+Submitted Batch Session 8312492
+########## ########## ########## ########## ########## ########## ########## ##########
+Execution Sum Up
+########## ########## ########## ########## ########## ########## ########## ##########
+Jobid     : 8301954
+Jobname   : brines_11
+User      : sicilana
+Account   : gen2309@rome
+Limits    : time = 22:14:00 , memory/job = 1775 Mo
+Date      : submit = 31/03/2025 15:03:18 , start = 31/03/2025 15:03:19 , end = 01/04/2025 13:17:21
+Execution : partition = rome , QoS = normal , Comment = (null)
+Resources : ntasks = 128 , cpus/task = 1 , ncpus = 128 , nodes = 1
+   Nodes=irene4041 CPU_IDs=0-255 Mem=227200 GRES=
+ 
+Memory / step 
+--------------
+                          Resident Size (Mo)                     Virtual Size (Go)
+JobID            Max     (Node:Task)       AveTask    Max  (Node:Task)            AveTask
+-----------      ------------------------  -------    --------------------------  -------
+8301954.extern       8 (irene4041   :   0)       0      0.00 (irene4041   :   0)    0.00
+8301954.batch       45 (irene4041   :   0)      21      1.00 (irene4041   :   0)    0.00
+
+Accounting / step 
+------------------
+
+JobID           JobName                  Ntasks  Ncpus Nnodes  Layout       Elapsed               User         System     Eff  State
+------------    ------------             ------  ----- ------  -------      -------               -------      ------     ---  -----
+8301954         brines_11                     -    128      1        -     09:25:14   (100%)            -            -      -  -
+8301954.batch   batch                         1    128      1  Unknown     09:25:14   (100%)     00:00:00     00:00:00      0  RUNNING
+8301954.extern  extern                        1    128      1  Unknown     09:25:14 (100.0%)     00:00:00     00:00:00      0  RUNNING
+8301954.0       cp2k.psmp                   128    128      1   BBlock     09:24:44  (99.9%)  45-03:55:28   4-13:45:32   99.0  COMPLETED
+########## ########## ########## ########## ########## ########## ########## ##########

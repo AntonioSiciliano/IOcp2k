@@ -1,0 +1,18 @@
+{
+    "cluster_name": "sicilana@irene-fr.ccc.cea.fr",
+    "pwd": "30Luglio1996!",
+    "cluster_scratch": "/ccc/scratch/cont003/gen2309/sicilana/NPT/128_H2O_4_NaCl_10_wt_673K_1000bar",
+    "job_name": "brines",
+    "partition_name": "rome",
+    "nnodes": 1,
+    "ncpus": 128,
+    "no_requeue": true,
+    "qos": "normal",
+    "time": 80000,
+    "account": "gen2309",
+    "minus_x": true,
+    "module_load": "module switch feature/openmpi/net/ib/ucx-noxpmem\n\nmodule load gnu/11 mpi/openmpi/4 dbcsr/2.7.0\n\nmodule load cp2k/2024.3\n\n",
+    "mpirun": "ccc_mprun ",
+    "run_job": "ccc_msub ",
+    "exe": "cp2k.psmp "
+}

@@ -4,10 +4,13 @@ import ase
 from ase import Atoms
 import ase.geometry
 import ase.neighborlist
+import ase.calculators.singlepoint
+import ase.data
 
 import copy
 import os, sys
 
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.ticker import MaxNLocator
@@ -15,33 +18,55 @@ from matplotlib.ticker import MaxNLocator
 import AtomicSnap
 from AtomicSnap import AtomicSnapshots
 
+import Conductivity
+from Conductivity import Conductivity
 
+import scipy
+
+import MDAnalysis
+import MDAnalysis.analysis
+import MDAnalysis.analysis.rdf
+import MDAnalysis.analysis.msd
+
+import subprocess
+
+import json
 
 __JULIA__ = False
 try:
-    print("Try to import Julia...\n")
-    import julia, julia.Main
-    # Load the Julia file
-    julia.Main.include("/home/antonio/IOcp2k/Modules/pair_correlation.jl")
-    # print(os.path.join(os.path.dirname(__file__), "pair_correlation.jl"))
-    # julia.Main.include(os.path.join(os.path.dirname(__file__), "pair_correlation.jl"))
+    from julia import Julia
+    # Avoid precompile issues
+    jl = Julia(compiled_modules=False)  
+    
+    # Import a Julia module
+    from julia import Main
+    
+    # Main.include("/home/antonio/IOcp2k/Modules/time_correlation.jl")
+    __JULIA__ = True
 except:
-    print("Probably a warning...\n")
+    __JULIA__ = False
+    print("It seems that Julia is not available. Try to run with python-jl\n")
 
 try:
     print("Test if Julia works...\n")
     julia.Main.eval('println("Hello from Julia!")')
     __JULIA__ = True
 except:
-    print("No Julia found!")
+    print("No Julia found!\n")
     __JULIA__ = False
 
+# Conversions
 BOHR_TO_ANGSTROM = 0.529177249 
 HA_TO_EV = 27.2114079527
 HA_TO_KELVIN = 315775.326864009
 HA_BOHR_TO_EV_ANGSTROM   = HA_TO_EV / BOHR_TO_ANGSTROM
 HA_BOHR3_TO_EV_ANGSTROM3 = HA_TO_EV / BOHR_TO_ANGSTROM**3
-BAR_TO_HA_BOHR3 = 6.89475728e-10 
+BAR_TO_GPA = 0.0001
+HABOHR3_TO_GPA = 29421.015697000003  #7355.256621097397
+AU_TIME_TO_PICOSEC = 2.4188843265864003e-05
+
+BAR_TO_HA_BOHR3 = BAR_TO_GPA * HABOHR3_TO_GPA**-1  
+
 # Velocities
 ANG_FEMPTOSEC_TO_HA = 0.04571028907825843
 
@@ -64,11 +89,11 @@ class AtomicSnapshots:
 
         Forces are in HARTREE/BOHR
         
-        Stresses are in BAT
+        Stresses are in HARTREE/BOHR3 (the output of cp2k are BAR)
         
         Velocities are in BOHR/AU TIME
 
-        Time step in fs
+        Time step in FEMPTOSECOND
 
         Parameters
         ----------
@@ -81,7 +106,7 @@ class AtomicSnapshots:
         self.forces = None
         # Energies HARTREE
         self.energies = None
-        # stress BAR
+        # stress HARTREE/BOHR3
         self.stresses = None
         # Atomic types
         self.types = None
@@ -89,8 +114,10 @@ class AtomicSnapshots:
         self.N_atoms = -1
         # The number of snapshots
         self.snapshots = 0
-        # The cell
+        # The cell NVT
         self.unit_cell = np.eye(3) * 10
+        # The unit cell NPT
+        self.unit_cells = None
         # Potential and kientic energy
         self.kinetic_energies = None
         self.potential_energies = None
@@ -117,7 +144,7 @@ class AtomicSnapshots:
     def init(self, file_name_head, unit_cell, debug = False, verbose = True, calc_type = 'GEO_OPT',
                    ext_pos = None, ext_force = None,
                    ext_stress = None, ext_vel = None,
-                   ext_ener = None):
+                   ext_ener = None, ext_cell = None):
         """
         READ XYZ FILE AS CREATED BY CP2K
 
@@ -143,6 +170,7 @@ class AtomicSnapshots:
             -ext_stress: the extension of the stress file
             -ext_velocities: the extension of the velocities file
             -ext_ener: the extension of the energ file
+            -ext_cell: the extension of the cell file
         """ 
         # Set up the unit cell in Angstrom
         self.unit_cell = np.copy(unit_cell)
@@ -183,6 +211,8 @@ class AtomicSnapshots:
         self.types = [''] * self.N_atoms
         # Forces HARTREE/BOHR
         self.forces = np.zeros((self.snapshots, self.N_atoms, 3))
+        # Unit cells ANGSTROM  each row has a unit cell vector
+        self.unit_cells = np.zeros((self.snapshots, 3, 3))
         # Conserved quantity in HARTREE
         self.cons_quant = np.zeros(self.snapshots)
         # Energies HARTREE
@@ -192,7 +222,7 @@ class AtomicSnapshots:
         # Velocities BOHR/AU TIME
         self.velocities = np.zeros((self.snapshots, self.N_atoms, 3))
         # Kinetic and potential energy in HARTREE
-        self.kinetic_energies = np.zeros(self.snapshots)
+        self.kinetic_energies   = np.zeros(self.snapshots)
         self.potential_energies = np.zeros(self.snapshots)
         # Temperature in KELVIN
         self.temperatures = np.zeros(self.snapshots)
@@ -287,8 +317,10 @@ class AtomicSnapshots:
                 self.stresses[isnap,:,:] = np.asarray(lines[isnap + 1].split()[2:], dtype = float).reshape((3,3))
                 #print(self.stresses[isnap,:,:] - np.asarray(lines[isnap + 1].split()[2:], dtype = float).reshape((3,3)))
                 
-                if units_bar:
-                    self.stresses[isnap, :, :] *= BAR_TO_HA_BOHR3
+            if units_bar:
+                print('Stress tensor in HA BOHR3')
+                # print(BAR_TO_HA_BOHR3)
+                self.stresses[:, :, :] *= BAR_TO_HA_BOHR3
                 
             # Close the file
             file_stress.close()
@@ -300,7 +332,7 @@ class AtomicSnapshots:
         ####### READ THE VELOCITY FILE ########
         if not(ext_vel is None):
             if not os.path.exists(file_name_head + ext_vel):
-                raise ValueError('I do not find the stress file {}'.format(file_name_head + ext_vel))
+                raise ValueError('I do not find the velocity file {}'.format(file_name_head + ext_vel))
             # Open the target file
             file_vel = open(file_name_head + ext_vel, 'r')
             lines = file_vel.readlines()
@@ -339,25 +371,67 @@ class AtomicSnapshots:
                 self.cons_quant[isnap]         = float(lines[isnap + 1].split()[5])
             if self.calc_type == 'MD':
                 self.dt = float(lines[2].split()[1]) - float(lines[1].split()[1])
-                print('Update the dt to {}'.format(self.dt))
+                print('Update the dt to {} fs'.format(self.dt))
+                self.dt = float(self.dt)
             # close the file
             file_ener.close()
-        ####### END READ THE VELOCITY FILE ########
+        ####### END READ THE ENER FILE ########
+
+
+
+        ####### READ THE CELL FILE ########
+        if not(ext_cell is None):
+            
+            if not os.path.exists(file_name_head + ext_cell):
+                raise ValueError('I do not find the cell file {}'.format(file_name_head + ext_cell))
+            # Open the target file
+            file_cells = open(file_name_head + ext_cell, 'r')
+            lines = file_cells.readlines()
+
+            for isnap in range(self.snapshots):
+                for i in range(3):
+                    self.unit_cells[isnap, 0, i]   = float(lines[isnap + 1].split()[2 + i])
+
+                for i in range(3):
+                    self.unit_cells[isnap, 1, i]   = float(lines[isnap + 1].split()[5 + i])
+
+                for i in range(3):
+                    self.unit_cells[isnap, 2, i]   = float(lines[isnap + 1].split()[8 + i])
+                
+
+            # close the file
+            file_cells.close()
+        ####### END READ THE CELL FILE ########
+        else:
+            print("No unit cells files was used\nwe are copying")
+            print(self.unit_cell)
+            print('\nin self.unit_cells')
+            self.unit_cells[:,:,:] = np.copy(self.unit_cell)
 
         return 
 
 
-    def create_ase_snapshots(self, pbc = [1,1,1], wrap_positions = True):
+    
+
+
+    def create_ase_snapshots(self, wrap_positions, subtract_com, pbc = True):
         """
         CREATE ASE SNAPSHOTS 
+        ====================
         
-        Rember that ase use EV, ANGSTROM
+        Rember that ase use EV, ANGSTROM, EV/ANGSTROM3 ANGSTROM/PICOSECOND
+
+        It correctly prints energy forces stresses and position
+
+        In cp2k the coordinates are saved not wrapped so we wrap them back in the cell
+
+        In addition, the center of mass can drift. So, after wrapping  the positions
         
         Paramters:
         ----------
-            -uc: a np.array with the cell BOHR
-            -pbc: the PBC conditions along x y z (1=True)
-            
+            -wrap_positions: bool, use False to compute Mean Square Displacement
+            -subtract_com: bool, if True we subract the position of the center of mass (useful for MSD analysis)
+            -pbc: bool, the PBC conditions along x y z (def True)
         Returns:
         --------
             -all_atoms: a list of ase objects
@@ -365,25 +439,46 @@ class AtomicSnapshots:
         # Set up all the ase atoms
         all_atoms = []
 
+        print("\nCREATING ASE ATOMS SNAPSHOTS...")
+        print("Wrapping the positions? {}".format(wrap_positions))
+        print("Subtracting the center of mass positions? {}".format(subtract_com))
+        print("Setting PBC? {}\n".format(pbc))
 
-        if wrap_positions:
-            print("Wrapping the positons")
+        if subtract_com:
+            # Get the center of mass positions (self.snaphsots, 3)
+            R_com = self.get_com_positions()
             
         # Range in the snapshots ans use ASE units
-        # ev and angstrom
+        # ev and angstrom, ev/angstrom3, angstrom/picosecond
         for isnap in range(self.snapshots):
-            if wrap_positions:
-                wrap_coords = ase.geometry.wrap_positions(self.positions[isnap,:,:], self.unit_cell, pbc=True)
-                atoms = Atoms(self.types, positions = wrap_coords, pbc = pbc)
-            else:
-                atoms = Atoms(self.types, positions = self.positions[isnap,:,:], pbc = pbc)
-            # print(atoms.unit_cell.reshape)
-            atoms.set_cell(self.unit_cell)
-            atoms.forces = self.forces[isnap,:,:] * HA_BOHR_TO_EV_ANGSTROM
-            atoms.energy = self.energies[isnap] * HA_BOHR_TO_EV_ANGSTROM
-            atoms.stress = transform_voigt(self.stresses[isnap,:,:]) * HA_BOHR3_TO_EV_ANGSTROM3
 
-            all_atoms.append(atoms)
+            energy     = self.energies[isnap] * HA_TO_EV
+            forces     = self.forces[isnap,:,:] * HA_BOHR_TO_EV_ANGSTROM
+            stress     = -transform_voigt(self.stresses[isnap,:,:]) * HA_BOHR3_TO_EV_ANGSTROM3
+            velocities = self.velocities[isnap,:,:] * BOHR_TO_ANGSTROM /AU_TIME_TO_PICOSEC
+
+            if wrap_positions:
+                positions = ase.geometry.wrap_positions(self.positions[isnap,:,:], self.unit_cells[isnap,:,:], pbc = True)
+            
+            if subtract_com:
+                positions = np.copy(self.positions[isnap,:,:] - R_com[isnap,:])
+            else:
+                positions = np.copy(self.positions[isnap,:,:])
+            
+            # Create the ase atoms object
+            structure = Atoms(self.types, positions)
+            structure.set_cell(self.unit_cells[isnap,:,:])
+            structure.pbc[:] = pbc
+            # Set the velocties
+            structure.set_velocities(velocities)
+
+            # Now set the calculato so that we have energies and forces
+            calculator = ase.calculators.singlepoint.SinglePointCalculator(structure, energy = energy, forces = forces, stress = stress)
+            # Attach the calculator
+            structure.calc = calculator
+
+            # Append to the list
+            all_atoms.append(structure)
             
         return all_atoms
 
@@ -398,7 +493,7 @@ class AtomicSnapshots:
             # Get the attribute's value
             value = getattr(self, attr) 
             
-            # Use np.copy() for NumPy arrays, deep copy for others
+            # Use np.copy() for numpy arrays, deep copy for others
             if isinstance(value, np.ndarray):
                 setattr(snapcopy, attr, np.copy(value))
             else:
@@ -446,10 +541,8 @@ class AtomicSnapshots:
             -snap_merge: the merged AtomicSnapshots() object
         """
         
-
         if self.N_atoms != atomic_snapshots.N_atoms:
             raise ValueError("The number of atoms should be the same")
-
 
         if self.types != atomic_snapshots.types:
             print(self.types, atomic_snapshots.types)
@@ -468,7 +561,7 @@ class AtomicSnapshots:
 
         # Iterate over instance attributes
         for attr in self.__dict__:  
-            if not(attr in ['uc', 'types', 'calc_type', 'snapshots', 'dt']):
+            if not(attr in ['unit_cell', 'types', 'calc_type', 'snapshots', 'dt']):
                 # Get the attribute's value
                 value1 =             getattr(self, attr) 
                 value2 = getattr(atomic_snapshots, attr)
@@ -476,6 +569,7 @@ class AtomicSnapshots:
                 # Use np.copy() for np arrays, copy.deepcopy for others
                 if isinstance(value1, np.ndarray):
                     setattr(snap_merge, attr, np.concatenate((value1, value2), axis=0))
+                # Use deepcopy for lists, string, dictionary etc
                 else:
                     setattr(snap_merge, attr, copy.deepcopy(value1))  
 
@@ -487,7 +581,7 @@ class AtomicSnapshots:
 
         snap_merge.types = copy.deepcopy(self.types)
 
-        snap_merge.dt = np.copy(self.dt)
+        snap_merge.dt = copy.deepcopy(self.dt)
         
         return snap_merge  
     
@@ -506,14 +600,10 @@ class AtomicSnapshots:
             -uc: a np.array with the cell BOHR
             -img_name: imag name if you want to save
         """
-        # Get the ase atoms
-        ase_atoms = self.create_ase_snapshots()
-        ase_energies = [ase_atoms[i].energy for i in range(self.snapshots)]
-        ase_energies = np.asarray(ase_energies) /self.N_atoms
-        
-        forces = [ase_atoms[i].forces[:,:] for i in range(self.snapshots)]
-        forces = np.asarray(forces).reshape((self.snapshots, self.N_atoms, 3))
-        ase_forces = np.einsum('iab, iab -> i', forces, forces) /self.N_atoms
+        matplotlib.use('tkagg')
+
+        energies = self.energies * HA_TO_EV /self.N_atoms
+        forces = np.einsum('iab, iab -> i', self.forces * HA_BOHR_TO_EV_ANGSTROM, self.forces * HA_BOHR_TO_EV_ANGSTROM) /self.N_atoms
         
         x = np.arange(self.snapshots, dtype = int)
         
@@ -521,13 +611,13 @@ class AtomicSnapshots:
         fig = plt.figure(figsize=(8, 5))
         gs = gridspec.GridSpec(2, 1, figure=fig)
         ax = fig.add_subplot(gs[0,0])
-        ax.plot(x, ase_energies, 's', color = 'k')
+        ax.plot(x, energies, 's', color = 'k')
         ax.set_ylabel('Energy [eV/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         
         ax = fig.add_subplot(gs[1,0])
-        ax.plot(x, ase_forces, 'd', color = 'red')
+        ax.plot(x, forces, 'd', color = 'red')
         ax.set_xlabel('Steps', size = 15)
         ax.set_ylabel('Force [eV/Ang/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
@@ -543,7 +633,7 @@ class AtomicSnapshots:
         return
 
 
-    def plot_temperature_evolution(self, average_window = [0,1], img_name = None):
+    def plot_temperature_evolution(self, average_window = [0,-1], img_name = None):
         """
         PLOT TEMPERATURE EVOLUTION FROM AND MD
         ======================================
@@ -557,6 +647,7 @@ class AtomicSnapshots:
             -average_window: a list of two numbers, so we will average self.temperatures[average_window[0]:average_window[1]]
             -img_name: imag name if you want to save
         """
+        matplotlib.use('tkagg')
         # Width and height
         fig = plt.figure(figsize=(7, 4))
         gs = gridspec.GridSpec(1,1, figure=fig)
@@ -564,11 +655,15 @@ class AtomicSnapshots:
         x = np.arange(self.snapshots) * self.dt
 
         T_av = np.average(self.temperatures[average_window[0]: average_window[1]])
+        # Get the standard error
+        N_samples = len(self.temperatures[average_window[0]: average_window[1]])
+        T_err = np.sqrt(np.sum((self.temperatures[average_window[0]: average_window[1]] - T_av)**2))/N_samples
         
         ax = fig.add_subplot(gs[0,0])
         xmin, xmax = np.sort(x[average_window])
-        ax.plot(x, self.temperatures,  color = 'green', lw = 3, label = 'T = {:.1f} K from {:.0f} to {:.0f} fs'.format(T_av, xmin, xmax))
-        ax.fill_between(x, self.temperatures, np.min(self.temperatures), where=(x >= xmin) & (x <= xmax), color='green', alpha=0.3)
+        ax.plot(x, self.temperatures,  color = 'purple', lw = 3, label = 'T = {:.1f} {:.3f} K from {:.2f} to {:.2f} ps'.format(T_av, T_err,
+                                                                                                                              xmin * 1e-3, xmax * 1e-3))
+        ax.fill_between(x, self.temperatures, np.min(self.temperatures), where=(x >= xmin) & (x <= xmax), color='purple', alpha=0.3)
         ax.axhline(y = T_av, color = 'k', linestyle=':')
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
         ax.tick_params(axis = 'both', labelsize = 12)
@@ -579,11 +674,175 @@ class AtomicSnapshots:
         if not(img_name is None):
             plt.savefig(img_name, dpi = 500)
         plt.show()
+
+
+    def plot_pressure_evolution(self, average_window = [0,-1], img_name = None):
+        """
+        PLOT PRESSURE EVOLUTION FROM AND MD
+        ======================================
+
+        The average temperature is 
+
+        .. math:: P_{av} = \frac{1}{N} \sum_{n=1}^{N} P_{n}
+        
+        Paramters:
+        ----------
+            -average_window: a list of two numbers, so we will average self.temperatures[average_window[0]:average_window[1]]
+            -img_name: imag name if you want to save
+        """
+        matplotlib.use('tkagg')
+        # Width and height
+        fig = plt.figure(figsize=(7, 4))
+        gs = gridspec.GridSpec(1,1, figure=fig)
+
+        x = np.arange(self.snapshots) * self.dt
+
+        # The pressure is the trace of the stress tensor
+        pressures = np.einsum("iaa -> i", self.stresses) * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA /3 
+
+        # Get the average with the standard error
+        N_samples = len(pressures[average_window[0]: average_window[1]])
+        P_av  = np.average(pressures[average_window[0]: average_window[1]])
+        P_err = np.sqrt(np.sum((pressures[average_window[0]: average_window[1]] - P_av)**2))/N_samples
+        
+        ax = fig.add_subplot(gs[0,0])
+        xmin, xmax = np.sort(x[average_window])
+        ax.plot(x, pressures,  color = 'green', lw = 3, label = 'P={:.3f} {:.3f} GPa from {:.2f} to {:.2f} ps'.format(P_av, P_err, xmin * 1e-3, xmax * 1e-3))
+        ax.fill_between(x, pressures, np.min(pressures), where=(x >= xmin) & (x <= xmax), color='green', alpha=0.3)
+        ax.axhline(y = P_av, color = 'k', linestyle=':')
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax.tick_params(axis = 'both', labelsize = 12)
+        ax.set_ylabel('Pressure [GPa]', size = 12)
+        ax.set_xlabel('Time [fs]', size = 15)
+        plt.legend(fontsize = 12)
+        plt.tight_layout()
+        if not(img_name is None):
+            plt.savefig(img_name, dpi = 500)
+        plt.show()
+
+
+    def plot_unit_cell_evolution(self, average_window = [0,-1], img_name = None):
+        """
+        PLOT ISOTROPIC UNIT CELL and VOLUME EVOLUTION FROM MD
+        =====================================================
+
+        The unit cell is plotted in ANGSTROM and the volume in ANGSTROM^3
+        
+        Paramters:
+        ----------
+            -average_window: a list of two numbers, so we will average self.unit_cell[average_window[0]:average_window[1],:,:]
+            -img_name: imag name if you want to save
+        """
+        matplotlib.use('tkagg')
+        # Width and height
+        fig = plt.figure(figsize=(10, 5))
+        gs = gridspec.GridSpec(1,2, figure=fig)
+
+        x = np.arange(self.snapshots) * self.dt
+        # Get the number of samples
+        N_samples = len(self.unit_cells[average_window[0]: average_window[1], 0, 0])
+        
+        # Get the average and the standard error in ANGSTROM
+        UC_av = np.einsum('iab -> ab', self.unit_cells[average_window[0]: average_window[1],:,:]) /N_samples
+        UC_err = np.sqrt(np.einsum('iab -> ab', (self.unit_cells[average_window[0]: average_window[1],:,:] - UC_av[:,:])**2))/N_samples
+
+        # Get the volumes in ANGSTROM^3
+        volumes = np.zeros(self.snapshots, dtype = float)
+        for i in range(self.snapshots):
+            volumes[i] = np.linalg.det(self.unit_cells[i,:,:]) 
+        # Get the average and the standard error in ANGSTROM^3
+        V_average = np.sum(volumes[average_window[0]: average_window[1]]) /N_samples
+        V_err = np.sqrt(np.sum((volumes[average_window[0]: average_window[1]] - V_average)**2)) /N_samples
+
+        for i in range(2):
+                ax = fig.add_subplot(gs[0,i])
+                xmin, xmax = np.sort(x[average_window])
+                if i == 0:
+                    # Plot only the x component
+                    ax.plot(x, self.unit_cells[:,i,i],  color = 'green', lw = 3,
+                            label = 'L={:.2f} {:.2f} Ang\nfrom {:.2f} to {:.2f} ps'.format(UC_av[i,i], UC_err[i,i], xmin * 1e-3, xmax * 1e-3))
+                    ax.fill_between(x,  self.unit_cells[:,i,i], np.min(self.unit_cells[:,i,i]), where=(x >= xmin) & (x <= xmax), color='green', alpha=0.3)
+                    ax.axhline(y = UC_av[i,i], color = 'k', linestyle=':')
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+                    ax.tick_params(axis = 'both', labelsize = 12)
+                    ax.set_ylabel('Cell [Angstrom]', size = 12)
+                else:
+                    ax.plot(x, volumes,  color = 'blue', lw = 3,
+                            label = 'V={:.2f} {:.2f} Ang3\nfrom {:.2f} to {:.2f} ps'.format(V_average, V_err, xmin * 1e-3, xmax * 1e-3))
+                    ax.fill_between(x,  np.asarray(volumes), np.min(volumes), where=(x >= xmin) & (x <= xmax), color='blue', alpha=0.3)
+                    ax.axhline(y = V_average, color = 'k', linestyle=':')
+                    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+                    ax.tick_params(axis = 'both', labelsize = 12)
+                    ax.set_ylabel('Volume [Angstrom$^{3}$]', size = 12)
+                ax.set_xlabel('Time [fs]', size = 15)
+                plt.legend(fontsize = 12)
+                plt.tight_layout()
+        if not(img_name is None):
+            plt.savefig(img_name, dpi = 500)
+        plt.show()
+
+
+    def plot_density_evolution(self, average_window = [0,-1], img_name = None):
+        """
+        PLOT DENISTY EVOLUTION FROM MD
+        ==============================
+
+        The density in g/cm3. Use ANGSTROM for length and g/mol for the masses
+        
+        Paramters:
+        ----------
+            -average_window: a list of two int numbers, so we will average self.unit_cell[average_window[0]:average_window[1],:,:]
+            -img_name: image name if you want to save
+        """
+        matplotlib.use('tkagg')
+        # Width and height
+        fig = plt.figure(figsize=(7, 4))
+        gs = gridspec.GridSpec(1,1, figure=fig)
+
+        # Time steps in PICOSECOND
+        x = np.arange(self.snapshots) * self.dt
+
+        # Get the total molar mass in g/mol
+        total_mass = np.sum(self.get_masses_from_types())
+
+        # Get the volumes in ANGSTROM^3
+        volumes = np.zeros(self.snapshots, dtype = float)
+        for i in range(self.snapshots):
+            volumes[i] = np.linalg.det(self.unit_cells[i,:,:]) 
+            
+        # Get the average and error of the volume in the time window in ANGSTROM^3
+        N_samples = len(volumes[average_window[0]: average_window[1]])
+        V_average = np.sum(volumes[average_window[0]: average_window[1]]) /N_samples
+        V_err = np.sqrt(np.sum((volumes[average_window[0]: average_window[1]] - V_average)**2)) /N_samples
+        
+        # Get the density in g/cm^3
+        rho = total_mass /(0.602214076 * volumes)
+        
+        rho_av  = np.sum(rho[average_window[0]: average_window[1]]) /N_samples
+        rho_err = np.sqrt(np.sum((rho[average_window[0]: average_window[1]] - rho_av)**2))/N_samples
+
+        # Plot everything
+        ax = fig.add_subplot(gs[0,0])
+        xmin, xmax = np.sort(x[average_window])
+        ax.plot(x, rho,  color = 'purple', lw = 3,
+                label = '$\\rho$' + '={:.4f} {:.4f} g/cm3\nfrom {:.2f} to {:.2f} ps'.format(rho_av, rho_err, xmin * 1e-3, xmax * 1e-3))
+        ax.fill_between(x,  rho, np.min(rho), where=(x >= xmin) & (x <= xmax), color='purple', alpha=0.3)
+        ax.axhline(y = rho_av, color = 'k', linestyle=':')
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax.tick_params(axis = 'both', labelsize = 12)
+        ax.set_ylabel('Density [g/cm$^{3}$]', size = 12)
+        ax.set_xlabel('Time [fs]', size = 15)
+        plt.legend(fontsize = 12)
+        plt.tight_layout()
+        if not(img_name is None):
+            plt.savefig(img_name, dpi = 500)
+        plt.show()
         
 
     def plot_md_nvt(self, img_name = None):
         """
-        PLOT ENERGY FORCE FROM ASE SNAPSHOTS FOR NVT SIMULATION
+        PLOT ENERGY FORCE KINETIC ENERGY TEMERATURE FROM ASE SNAPSHOTS FOR NVT SIMULATION
+        ==================================================================================
         
         Rember that ase use EV, ANGSTROM
         
@@ -595,65 +854,54 @@ class AtomicSnapshots:
         ----------
             -img_name: imag name if you want to save
         """
-        # Get the ase atoms
-        ase_atoms = self.create_ase_snapshots()
-        ase_energies = [ase_atoms[i].energy for i in range(self.snapshots)]
-        ase_energies = np.asarray(ase_energies) /self.N_atoms
+        matplotlib.use('tkagg')
         
-        forces = [ase_atoms[i].forces[:,:] for i in range(self.snapshots)]
-        forces = np.asarray(forces).reshape((self.snapshots, self.N_atoms, 3))
-        ase_forces = np.einsum('iab, iab -> i', forces, forces) /self.N_atoms
+        energies = self.energies * HA_TO_EV /self.N_atoms
+        forces = np.einsum('iab, iab -> i', self.forces * HA_BOHR_TO_EV_ANGSTROM, self.forces * HA_BOHR_TO_EV_ANGSTROM) /self.N_atoms
         
         x = np.arange(self.snapshots, dtype = int) * self.dt
         
         # Width and height
-        fig = plt.figure(figsize=(10, 5))
-        gs = gridspec.GridSpec(2,3, figure=fig)
+        fig = plt.figure(figsize=(10, 12))
+        gs = gridspec.GridSpec(3,2, figure=fig)
         
-        ax = fig.add_subplot(gs[0,0])
-        ax.plot(x, ase_energies,  color = 'k', lw = 3)
+        ax = fig.add_subplot(gs[0,:])
+        ax.plot(x, energies,  color = 'k', lw = 3)
         ax.set_ylabel('Energy [eV/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
         
-        ax = fig.add_subplot(gs[0,1])
-        ax.plot(x, self.potential_energies * HA_TO_EV/self.N_atoms,  color = 'purple', lw = 3)
-        ax.set_ylabel('Pot energy [eV/atom]', size = 12)
-        ax.tick_params(axis = 'both', labelsize = 12)
-        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+
         
-        ax = fig.add_subplot(gs[0,2])
+        ax = fig.add_subplot(gs[1,0])
         ax.plot(x, self.kinetic_energies * HA_TO_EV/self.N_atoms,  color = 'darkorange', lw = 3)
         ax.set_ylabel('Kin energy [eV/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
 
-        
-
-        
-        ax = fig.add_subplot(gs[1,0])
-        ax.plot(x, ase_forces,  color = 'red', lw = 3)
+        ax = fig.add_subplot(gs[1,1])
+        ax.plot(x, forces,  color = 'red', lw = 3)
         ax.set_xlabel('Time [fs]', size = 15)
         ax.set_ylabel('Force [eV/Ang/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
 
+        
 
-        ax = fig.add_subplot(gs[1,1])
-        ax.plot(x, self.temperatures,  color = 'green', lw = 3)
+        ax = fig.add_subplot(gs[2,0])
+        ax.plot(x, self.temperatures,  color = 'purple', lw = 3)
         ax.set_xlabel('Time [fs]', size = 15)
         ax.set_ylabel('Temperature [Kelvin]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
 
-
-        ax = fig.add_subplot(gs[1,2])
-        ax.plot(x, self.cons_quant * HA_TO_EV * 1000/self.N_atoms,  color = 'k', lw = 3)
+        ax = fig.add_subplot(gs[2,1])
+        ax.plot(x, self.cons_quant * HA_TO_EV * 1000/self.N_atoms,  color = 'darkblue', lw = 3)
         ax.set_xlabel('Time [fs]', size = 15)
         ax.set_ylabel('Cons qunt [meV/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
@@ -669,27 +917,163 @@ class AtomicSnapshots:
         
         return
 
+    def plot_md_npt(self, img_name = None):
+        """
+        PLOT ENERGY FORCE FROM ASE SNAPSHOTS FOR NVT SIMULATION
+        
+        Rember that ase use EV, ANGSTROM
+        
+        To plot the force at each time step 
+        
+        .. math::   \sum_{I=1}^{N_at} F_I \cdot F_I /N_at
+        
+         Paramters:
+        ----------
+            -img_name: imag name if you want to save
+        """
+        matplotlib.use('tkagg')
+
+        energies = self.energies * HA_TO_EV /self.N_atoms
+        forces = np.einsum('iab, iab -> i', self.forces * HA_BOHR_TO_EV_ANGSTROM, self.forces * HA_BOHR_TO_EV_ANGSTROM) /self.N_atoms
+
+        
+        x = np.arange(self.snapshots, dtype = int) * self.dt
+        
+        # Width and height
+        fig = plt.figure(figsize=(10, 12))
+        gs = gridspec.GridSpec(4,2, figure=fig)
+        
+        ax = fig.add_subplot(gs[0,:])
+        ax.plot(x, energies,  color = 'k', lw = 3)
+        ax.set_ylabel('Energy [eV/atom]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+        
+
+        ax = fig.add_subplot(gs[1,0])
+        ax.plot(x, self.kinetic_energies * HA_TO_EV/self.N_atoms,  color = 'darkorange', lw = 3)
+        ax.set_ylabel('Kin energy [eV/atom]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
 
 
-    def show_com_motion(self, dictionary, img_name = None):
+        ax = fig.add_subplot(gs[1,1])
+        ax.plot(x, forces,  color = 'red', lw = 3)
+        ax.set_xlabel('Time [fs]', size = 15)
+        ax.set_ylabel('Force [eV/Ang/atom]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+
+        
+        ax = fig.add_subplot(gs[2,0])
+        ax.plot(x, self.temperatures,  color = 'purple', lw = 3)
+        ax.set_xlabel('Time [fs]', size = 15)
+        ax.set_ylabel('Temperature [Kelvin]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+
+        ax = fig.add_subplot(gs[2,1])
+        ax.plot(x, self.cons_quant * HA_TO_EV * 1000/self.N_atoms,  color = 'darkblue', lw = 3)
+        ax.set_xlabel('Time [fs]', size = 15)
+        ax.set_ylabel('Cons qunt [meV/atom]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+
+        ax = fig.add_subplot(gs[3,:])
+        pressure = np.einsum("iaa -> i", self.stresses) * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA /3
+        ax.plot(x, pressure,  color = 'green', lw = 3)
+        ax.set_xlabel('Time [fs]', size = 15)
+        ax.set_ylabel('P [GPa]', size = 12)
+        ax.tick_params(axis = 'both', labelsize = 12)
+        # ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+        
+        plt.tight_layout()
+
+        if not(img_name is None):
+            plt.savefig(img_name, dpi = 500)
+        plt.show()
+        
+        return
+
+    def get_masses_from_types(self):
+        """
+        GET THE MASSES FOR ALL THE ATOMS IN THE SNAPSHOTS
+        =================================================
+
+        Use units of ASE
+        """
+        # Get the masses
+        masses_array = np.zeros(self.N_atoms)
+        for i, at_type in enumerate(self.types):
+            masses_array[i] = ase.data.atomic_masses[ase.data.atomic_numbers[at_type]]
+
+        return masses_array
+        
+    def get_com_positions(self):
+        """
+        GET THE CENTER OF MASS POSITION
+        ===============================
+
+        In Angstrom
+
+        Returns:
+        --------
+            -R_com: np.array with shape (snapshots, 3), the center of mass positions
+        """
+        masses_array = self.get_masses_from_types()
+
+        # Get the center of mass position
+        R_com = np.einsum('a, iab -> ib', masses_array, self.positions) /np.sum(masses_array)
+
+        return R_com
+
+
+    def get_com_velocities(self):
+        """
+        GET THE CENTER OF MASS VELOCITY
+        ===============================
+
+        In BOHR/AU_TIME
+
+        Returns:
+        --------
+            -V_com: np.array with shape (snapshots, 3), the center of mass velocities
+        """
+        # Get the masses
+        masses_array = np.zeros(self.N_atoms)
+        for i, at_type in enumerate(self.types):
+            masses_array[i] = ase.data.atomic_masses[ase.data.atomic_numbers[at_type]]
+
+        # Get the center of mass velocities
+        V_com = np.einsum('a, iab -> ib', masses_array, self.velocities) /np.sum(masses_array)
+
+        return V_com
+
+
+
+    def show_com_motion(self, img_name = None):
         """
         PLOT THE MOTION OF THE CENTER OF MASS
         =====================================
 
         Checks the drift of the com
 
-        Use units of AMU for the mass
-
-        Paramters:
-        ----------
-            -dictionary: a dictionary with the atomic symbols and corresponing masses dictionary = {"H" : 1.007825, "O" : 15.99491 , "Na" : 22.98976928, "Cl" : 35.446}
+        Use units of AMU for the mass from ase
         """
-        
-        masses_array = np.zeros(self.N_atoms)
-        for i , at_type in enumerate(self.types):
-            masses_array[i] = dictionary[at_type] 
-        
-        R_com = np.einsum('a, iab -> ib', masses_array, self.positions) /np.sum(masses_array)
+        matplotlib.use('tkagg')
+       
+        # Get the center of mass positions (self.snaphsots, 3)
+        R_com = self.get_com_positions()
 
         # Time in femptosecond
         x = np.arange(self.snapshots, dtype = int) * self.dt
@@ -731,190 +1115,293 @@ class AtomicSnapshots:
         return
 
 
-    def get_pair_correlation_function(self, type1, type2, dr, Nr, samples, debug = True, using_pbc = True):
+    def get_pair_correlation_functions(self, selected_atoms, t_ini = 2.5, my_r_range = (0.01, 6.0), bins = 500,
+                                       ase_atoms_file = "atoms_gr.xyz", save_ase_atoms_file = False, wrap_positions = True, use_pbc = True,
+                                       json_file_result = "pair_corr_function.json" , show_results = True, save_plot = False):
         """
-        RETURNS THE PAIR CORRELATION FUNCTION
-        =====================================
-        
-        Rember that ase use EV, ANGSTROM
-        
-        It computes the pair correlation function
-        
-        .. math::  g(r) = \frac{1}{4 \pi r^2 N^2} \sum_{I=1}^{N_at_1} \sum_{J \neq I}^{N_at_2} \sum_{i=1}^{N_samples} V^{(i)} \delta(r - R^{(i)}_{IJ})
-        
-         Paramters:
-        ----------
-            -type1, type2: the pair of atoms you want to consider in the g(r)
-            -dr: the radial spacing in ANGSTROM
-            -Nr: the number of points in the grid
-            -samples: a list of int, so we average the g(r) from samples[0] to samples[1]
-            -debug: bool, to print everything
-            -using_pbc: bool, to use or not pbc when omputing the distances
+        GET THE PAIR CORRELATION FUNCTION
+        =================================
+
+        Note MDAnalysis always uses PBC irrespectively of wheater the ase atoms used have PBC.
+        Note that to have correct PBC in MDAnalysis we must initialize the dimensions.
+
+        Parameters:
+        -----------
+            -selected_atoms: list, list of atomic types for which we compute the pair correlation function
+            
+            -t_ini: float, the equilibration time PIDCOSECOND. After t_ini we will start the sampling
+            
+            -my_r_range: tuple, the minimum and maximum value for r in ANGSTROM
+            -bins: int, the number of r values
+            
+            -ase_atoms_file: the name of the xyz file containing all the snapshots info
+            -save_ase_atoms_file: bool, if True we do not delete the xyz file ase_atoms_file
+            
+            -wrap_positions: bool, if True the positions are wrapped in the ase atoms objects
+            -use_pbc: bool, if True PBC are imposed in the ase atoms objects
+            
+            -json_file_result: the name of the json file containing the dictionary with the results
+            
+            -show_results: bool, if True we print the diffusion constants and the MSD
+            -save_plot: bool, if True we save the plot
+
         Returns:
         --------
-            -r: np.array, with the radial grid
-            -g(r): np.array, the pair correlation function
+            -g_results: a dictionary containing as items the atomic pair types with r and g(r)
         """
-        # The radial variable in ANGSTROM
-        r = dr * np.arange(1, 1 + Nr)
-
-        # For each snapshot we will compute an histogram of distances then we will take the average
-        all_counts = np.zeros(len(r) - 1)
+        matplotlib.use('tkagg')
         
-        if len(samples) != 2:
-            raise ValueError("Give me two snapshots indices to know where to compute the RDF")
-
-        if not(samples[1] > samples[0]):
-            raise ValueError('Wrong samples')
-
-        if samples[1] > self.snapshots:
-            raise ValueError('The simulations has only {} snapshots'.format(self.snapshots))
-
-        # Get the ase snapshots
-        ase_atoms = self.create_ase_snapshots()
+        # If there are no selected atoms we compute the MSD and D for all the atomic types
+        print("\n\n========PAIR CORRELATION FUNCTION with MDanalysis========")
         
-        for snapshot in np.arange(samples[0], samples[1]):
-            if debug:
-                if snapshot % 50 == 0:
-                    print("\n\nDOING {}".format(snapshot))
-            # Get the snapshots
-            atoms = ase_atoms[snapshot]
-            # Get the total number of atoms
-            N_at_tot = len(atoms.positions[:,0])
+        # Get the atomic types for which we want the diffusion constant
+        if selected_atoms is None:
+            raise ValueError("Provide a list of atom pairs for which you want to compute the g(r)")
 
-            # Get the chemical symbols
-            chem_symb = np.asarray(atoms.get_chemical_symbols()).ravel()
+        # if my_r_range is None:
+        #     my_r_range = (0.0, 6.0)
 
-            # Get all the distances using pbc or not ANGSTROM
-            all_distances = atoms.get_all_distances(mic = using_pbc)
+        # Prepare the ase atoms to be read
+        ase_atoms = self.create_ase_snapshots(wrap_positions = wrap_positions, subtract_com = False, pbc = use_pbc)
+        index_ini = int(t_ini * 1e+3/self.dt)
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
+
+        # A dictionary with atom types and the corresponding diffusion constant and error
+        g_results = {}
+        # Read the xyz file
+        MD_atoms = MDAnalysis.Universe(ase_atoms_file)
+
+        # Prepare a plot
+        if show_results:
+            # Width and height
+            fig = plt.figure(figsize=(8, 8))
+            if len(selected_atoms) == 1:
+                gs = gridspec.GridSpec(1, 1, figure = fig)
+            else:
+                gs = gridspec.GridSpec(len(selected_atoms)//2, 2, figure = fig)
+
+        print("Setting the cell dimension and the time step...")
+        for snapshot, MD_atoms_snapshot in enumerate(MD_atoms.trajectory):
+            # Manually set the unit cell dimensions in ANGSTROM
+            MD_atoms_snapshot.dimensions = [self.unit_cells[snapshot,0,0], self.unit_cells[snapshot,1,1], self.unit_cells[snapshot,2,2], 90.0, 90.0, 90.0]  
+            # Apply the time step to all frames in PICOSECONDS
+            MD_atoms_snapshot.dt = self.dt* 1e-3
+
+        for index, atomic_pair in enumerate(selected_atoms):
+            print('\nRDF for {} {} after equilibration of {} ps'.format(atomic_pair[0], atomic_pair[1], t_ini))
+            # Select only the atomic type we want
+            MD_atoms_selected1 = MD_atoms.select_atoms('name {}'.format(atomic_pair[0]))
+            # Select only the atomic type we want
+            MD_atoms_selected2 = MD_atoms.select_atoms('name {}'.format(atomic_pair[1]))
+
+            # Compute RDF
+            rdf_calc = MDAnalysis.analysis.rdf.InterRDF(MD_atoms_selected1, MD_atoms_selected2,
+                                                        range = my_r_range, nbins = bins, norm = 'rdf')
+            rdf_calc.run(verbose = True)
+
+            r, gr = rdf_calc.results.bins, rdf_calc.results.rdf
+            # Save the results
+            g_results.update({"{}{}".format(atomic_pair[0], atomic_pair[1]) : [list(r), list(gr)]})
             
-            # select only the pair of atoms of which we want the RDF
-            selected_atoms1 = np.arange(N_at_tot)[np.isin(chem_symb, [type1])]
-            selected_atoms2 = np.arange(N_at_tot)[np.isin(chem_symb, [type2])]
-            # Mix the two types of atoms using meshgrid
-            mix = np.meshgrid(selected_atoms1, selected_atoms2)
+            if show_results:
+                ax = fig.add_subplot(gs[index // 2, index %2])
+                ax.plot(r, gr, lw = 3, color = "purple", label = "g(r) for {} {}".format(atomic_pair[0], atomic_pair[1]))
+                if gr.max() > 10 * gr[-1]:
+                    ax.set_ylim(0, 2 * gr[-1])
+                ax.set_xlabel('r [Angstrom]', size = 15)
+                ax.set_ylabel('g(r)', size = 12)
+                ax.tick_params(axis = 'both', labelsize = 12)
+                plt.legend(fontsize = 15)
+        plt.tight_layout()
+        if save_plot:
+            plt.savefig("gr.png", dpi = 500)
+        if show_results:
+            plt.show()
 
-            # Select only the distances of the two atoms kinds we want
-            # (len(selecte_atoms_2), len(selected_atoms_1))
-            selected_distances = all_distances[mix[0],mix[1]]
+        save_dict_to_json(json_file_result, g_results)
+        
+        if not save_ase_atoms_file:
+            subprocess.run("rm {}".format(ase_atoms_file), shell = True)
 
-            if debug:
-                # shape are (len(selecte_atoms_2), len(selected_atoms_1))
-                print("Selected atoms type1") 
-                print(selected_atoms1)
-                print(mix[0])
-                print(selected_atoms1.shape)
-                print("Selected atoms type2") 
-                print(selected_atoms2)
-                print(mix[1].shape)
-                print(selected_atoms2.shape)
-                
-                print("Selected distances") 
-                # shape are (len(selecte_atoms_2), len(selected_atoms_1))
-                print(all_distances[mix[0],mix[1]].shape)
-                # print(all_distances)
+        return g_results
 
-            # Get rid of small distances (equal atoms)
-            d = selected_distances[selected_distances > 0.].ravel()
 
-            # Make the histrogram
-            counts, x = np.histogram(d, bins = r)
-            # Add the hstrogram multiplied by the volume and divided by two so to cosider double countins
-            all_counts += atoms.get_volume() * counts/2
-                
-        # The numbers of snapshots  usd
-        N_samples = samples[1] - samples[0]
+    def get_diffusion_constant(self, t_ini = 2.5, time_windows = None, subtract_com = True, selected_atoms = None,
+                               ase_atoms_file = "atoms_msd.xyz", save_ase_atoms_file = False,
+                               json_file_result = "self_diffusion.json" , show_results = True, save_plot = False):
+        """
+        GET THE SELF-DIFFUSION CONSTANT FROM THE FIT OF THE MEAN SQUARE DISPLACEMENT
+        ============================================================================
 
-        # Return the radial cooridnate and the g(r)
-        return r[1:], all_counts /(4 * np.pi * r[1:]**2 * N_samples)
+        Remeber that for the MSD the coordinates should not be wrapped otherwise all the distances are fucked up
+
+        Also remember to subtract the COM position during the MD
+
+        Parameters:
+        -----------
+            -t_ini: float, the initial equilibration time, i.e. after t_ini we start sampling
+
+            -time_windows: list
+            
+            -subtract_com: bool, if true we subtract the center of mass positions to the all atomic positions in the snapshots
+            -selected_atoms: list, list of atomic types for which we compute the self diffusion constant
+            
+            -ase_atoms_file: the name of the xyz file containing all the snapshots info
+            -save_ase_atoms_file: bool, if True we do not delete the xyz file ase_atoms_file
+            
+            -json_file_result: the name of the json file containing the dictionary with the results
+            
+            -show_results: bool, if True we print the diffusion constants and the MSD
+            -save_plot: bool, if True we save the plot
+
+        Returns:
+        --------
+            -D_results: a dictionary containing as items the atomic types with diffusion constants and its error
+        """
+        matplotlib.use('tkagg')
+        
+        # If there are no selected atoms we compute the MSD and D for all the atomic types
+        print("\n\n========MSD ANALYSIS========")
+        
+        # Get the atomic types for which we want the diffusion constant
+        if selected_atoms is None:
+            selected_atoms = set(self.types)
+            print("MSD will be computed for ", selected_atoms)
+        else:
+            if np.sum(np.isin(selected_atoms, self.types), dtype = int) != len(selected_atoms):
+                raise ValueError("{} not found in the snapshots!")
+
+        # Prepare the ase atoms to be read
+        ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = True, pbc = False)
+        index_ini = int(t_ini * 1e+3/self.dt)
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
+
+        # A dictionary with atom types and the corresponding diffusion constant and error
+        D_results = {}
+        # Read the xyz file
+        MD_atoms = MDAnalysis.Universe(ase_atoms_file)
+        
+        # Prepare a plot
+        if show_results:
+            # Width and height
+            fig = plt.figure(figsize=(8, 8))
+            if len(selected_atoms) == 1:
+                 gs = gridspec.GridSpec(1, 1, figure = fig)
+            else:
+                gs = gridspec.GridSpec(len(selected_atoms)//2, 2, figure = fig)
+
+        print("Setting the cell dimension and the time step...")
+        for snapshot, MD_atoms_snapshot in enumerate(MD_atoms.trajectory):
+            # Manually set the unit cell dimensions in ANGSTROM
+            MD_atoms_snapshot.dimensions = [self.unit_cells[snapshot,0,0], self.unit_cells[snapshot,1,1], self.unit_cells[snapshot,2,2], 90.0, 90.0, 90.0]  
+            # Apply the time step to all frames in PICOSECONDS
+            MD_atoms_snapshot.dt = self.dt* 1e-3
+            # if snapshot % 100 == 0:
+            #     print(f"Frame {MD_atoms_snapshot.frame}: Unit cell = {MD_atoms_snapshot.dimensions}")
+        
+
+        for index, atomic_type in enumerate(selected_atoms):
+            # Select only the atomic type we want
+            MD_atoms_selected = MD_atoms.select_atoms('name {}'.format(atomic_type))
+            # Prepare the MSD analysis
+            MSD_tool = MDAnalysis.analysis.msd.EinsteinMSD(MD_atoms_selected, select = 'all', msd_type = 'xyz',  fft = True)
+            print("\nGetting the Mean Square Displacement for {}".format(atomic_type))
+            # Run the calculation
+            MSD_tool.run()
+            print("The number of atoms is {} and the number of frames {}".format(MSD_tool.n_particles, MSD_tool.n_frames))
+            # PICOSCOND and ANGSTROM^2
+            
+
+            # print(MSD.results.msds_by_particle.shape )
+            my_msd =  MSD_tool.results.timeseries
+            # prepare the lagtimes in PICOSECOND
+            timestep = MD_atoms.trajectory[0].dt
+            lagtimes = np.arange(len(MD_atoms.trajectory)) * timestep
+
+            if time_windows is None:
+                start_time,  end_time  = lagtimes[len(lagtimes)//2] - 0.3 * lagtimes[-1], lagtimes[len(lagtimes)//2] + 0.3 * lagtimes[-1]
+            else:
+                start_time,  end_time  = time_windows
+            print("The fit of MSD is done from {:.2f} to {:.2f} ps with a total time {:.2f} ps".format(start_time, end_time, lagtimes[-1]))
+            mask = (start_time < lagtimes) & (lagtimes < end_time)
+            
+            linear_model = scipy.stats.linregress(lagtimes[mask], my_msd[mask])
+            slope, slope_error = linear_model.slope, linear_model.stderr
+            # dim_fac is 3 as we computed a 3D msd with 'xyz', ANGSTROM/PICOSECOND
+            D, D_error = slope * 1/(2 * MSD_tool.dim_fac), slope_error * 1/(2 * MSD_tool.dim_fac)
+            # Now in METER^2/SECOND
+            D *= 1e-8
+            D_error *= 1e-8
+
+            D_results.update({atomic_type : [D, D_error]})
+            print("=>Diffusion constant for atom {}".format(atomic_type))
+            print("==>D {:.3e} +- {:.3e} ".format(D, D_error) + "m$^2$/s")
+            # plt.plot(lagtimes, res)
+        
+            if show_results:
+                ax = fig.add_subplot(gs[index // 2, index %2])
+                ax.set_title("MSD for {}".format(atomic_type))
+                # PICOSCOND and ANGSTROM^2
+                ax.plot(lagtimes, my_msd, lw = 3, color = "k")
+                ax.plot(lagtimes[mask], lagtimes[mask] * slope + linear_model.intercept, lw = 3, ls = ":", color = "red",
+                        label = 'Fit D={:.2e} '.format(D) + "m$^2$/s")
+                ax.set_xlabel('Time [ps]', size = 15)
+                ax.set_ylabel('MSD [Angstrom$^2$]', size = 12)
+                ax.tick_params(axis = 'both', labelsize = 12)
+                plt.legend()
+        plt.tight_layout()
+        if save_plot:
+            plt.savefig("diffusion.png", dpi = 500)
+        if show_results:
+            plt.show()
+
+        # Save the results to a json file
+        save_dict_to_json(json_file_result, D_results)
+        # Remove the ase atoms object
+        if not save_ase_atoms_file:
+            subprocess.run("rm {}".format(ase_atoms_file), shell = True)
+
+        return D_results
+
+
+    def get_conductivity(self, t_ini = 2.5):
+        """
+        GET THE CONDUCTIVITY
+        """
+        # Prepare the ase atoms to be read
+        ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = True, pbc = False)
+        index_ini = int(t_ini * 1e+3/self.dt)
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
         
         
 
-    # def OLDget_pair_correlation_function(self, type1, type2, dr, Nr):
-    #     """
-    #     RETURNS THE PAIR CORRELATION FUNCTION
-    #     =====================================
+
+
+
+
+def save_dict_to_json(json_file_name, my_dict):
+    """
+    SAVE A DICTIONARY TO JSON FILE
+    ==============================
+    """
+
+    # Save dictionary to a JSON file
+    with open(json_file_name, "w") as file:
+         # 'indent=4' makes the JSON human-readable
+        json.dump(my_dict, file, indent = 4) 
         
-    #     Rember that ase use EV, ANGSTROM
-        
-    #     It computes the pair correlation function
-        
-    #     .. math::  g(r) = \\frac{V}{4 \pi r^2 N^2} \left\langle \delta(r - R_{IJ}) \right\rangle
-        
-    #      Paramters:
-    #     ----------
-    #         -type1, type2: the pair of atoms you want to consider in the g(r)
-    #         -dr: the radial spacing in ANGSTROM
-    #         -Nr: the number of points in the grid
 
-    #     Returns:
-    #     --------
-    #         -r: np.array, with the radial grid
-    #         -g: np.array, the pair correlation function
-    #     """
-        
-    #     if not __JULIA__:
-    #         raise ValueError('You need Julia')
-
-    #     print("Get the pair correlation function for {} {}".format(type1, type2))
-        
-    #     # Get the ase atoms
-    #     ase_atoms = self.create_ase_snapshots()
-
-    #     # Exclude the zero ANGTROM
-    #     r_grid = dr * np.arange(1, Nr + 1)
-
-    #     # RDF
-    #     g_r = np.zeros(len(r_grid), dtype = type(dr))
-
-    #     # Check that the maxium is compatible with the PBC
-    #     for i in range(3):
-    #         if r_grid[-1] > self.unit_cell[i,i]:
-    #             raise ValueError('Reduce the number of points Nr or reduce the dr')
-
-    #     # def get_mask_array_string(string_list, mytype):
-
-    #     # mask_types = np.where(self.types == type1) or np.where(self.types == type2)
-
-    #     def generate_mask(input_list, target_elements):
-    #         mask = [elem in target_elements for elem in input_list]
-    #         return np.asarray(mask, dtype = bool)
-
-
-    #     for ir, r in enumerate(r_grid):
-    #         for isnap in range(1):
-    #             # Total number of atoms for the current snapshots
-    #             N_at        = ase_atoms[isnap].get_number_of_atoms()
-    #             # Get the distances ANGSTROM
-    #             distances   = ase_atoms[isnap].get_all_distances(mic = True)
-    #             # Get the atomic types
-    #             atoms_types = ase_atoms[isnap].get_chemical_symbols()
-    #             # Get the mask to select only type1 and type2 atoms
-    #             mask = generate_mask(atoms_types, [type1, type2])
-
-    #             # In this way the julia code runs only on a subset of atoms
-    #             N_at_mask   = np.arange(N_at)[mask]
-    #             g_r[ir]     = julia.Main.pair_correlation_function(type1, type2, r, dr, N_at_mask, atoms_types, distances, np.linalg.det(ase_atoms[isnap].cell), N_at)
-    #     # for ir, r in enumerate(r_grid):
-    #     #     for isnap in range(self.snapshots):
-    #     #         N_at = ase_atoms[isnap].get_number_of_atoms()
-    #     #         atoms_types = ase_atoms[isnap].get_chemical_symbols()
-
-    #     #         for atom1 in range(N_at):
-    #     #             for atom2 in range(N_at):
-    #     #                 if atom1 != atom2:
-    #     #                     if (atoms_types[atom1] == type1 and atoms_types[atom2] == type2) or (atoms_types[atom2] == type1 and atoms_types[atom1] == type2):
-    #     #                         d = ase_atoms[isnap].get_distance(atom1, atom2,  mic = True)
+def load_dict_from_json(json_file_name):
+    """
+    LOAD A DICTIONARY FROM A JSON FILE
+    ==================================
+    """
+    # Load dictionary from a JSON file
+    with open(json_file_name, "r") as file:
+        # Converts JSON into a Python dictionary
+        dictionary = json.load(file)   
     
-    #     #                         if (r - dr) < d and d < (r + dr):
-    #     #                             g_r[ir] += dr * np.linalg.det(ase_atoms[isnap].cell)/(4 * np.pi * r**2 * N_at**2) 
-    #     #     g_r[ir] /= self.snapshots
-        
-    #     return r_grid, g_r
-
-
-
-
+    return dictionary
 
 
 def transform_voigt(tensor, voigt_to_mat = False):
@@ -922,12 +1409,25 @@ def transform_voigt(tensor, voigt_to_mat = False):
     TRANSFORM TO VOIGT NOTATION
     ===========================
     
-    Copied from Cellconstructor useful to ocnvert everything in ase format
-    
+    Copied from Cellconstructor useful to convert everything in ase format.
+
+    The voigt notation transforms a symmetric tensor
+
+    ..math: \sigma_{00} \sigma_{01} \sigma_{02}
+            \sigma_{10} \sigma_{11} \sigma_{12}
+            \sigma_{20} \sigma_{21} \sigma_{22}
+
+    to a 6 compoentn vector
+
+    ..math: \sigma_{00} \sigma_{11} \sigma_{22} \sigma_{12} \sigma_{02} \sigma_{01}
+     
     Parameters:
     -----------
-        -voit_to_mat. bool is True, the tensor is assumed to be in voigt format.
-        Otherwise it assumed as a 3x3 symmetric matrix (upper triangle will be read).
+        -voit_to_mat. bool default is False, Otherwise it is assumed as a 3x3 symmetric matrix (upper triangle will be read).
+                      If True the tensor is assumed to be in voigt format.
+    Returns:
+    --------
+        -new_tensor: np.array
     """
 
     if voigt_to_mat:
@@ -942,7 +1442,7 @@ def transform_voigt(tensor, voigt_to_mat = False):
     else:
         assert tensor.shape == (3,3)
         new_tensor = np.zeros(6, dtype =  type(tensor[0,0]))
-
+        # First 
         for i in range(3):
             new_tensor[i] = tensor[i,i]
         new_tensor[3] = tensor[1,2]

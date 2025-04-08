@@ -1,0 +1,225 @@
+@SET RESTART        1
+
+@SET BASIS_POT_PATH /ccc/work/cont003/gen2309/sicilana/DATA_CP2K
+@SET SYSTEM         brines
+@SET VDW            1
+@SET USE_SMOOTH     0
+@SET USE_GPAW       1
+        
+&GLOBAL
+  PROJECT     ${SYSTEM}
+  RUN_TYPE    MD
+  PRINT_LEVEL LOW
+  FLUSH_SHOULD_FLUSH 
+&END GLOBAL
+
+&FORCE_EVAL
+
+  METHOD QuickStep
+  STRESS_TENSOR ANALYTICAL
+
+  &DFT
+    BASIS_SET_FILE_NAME ${BASIS_POT_PATH}/GTH_BASIS_SETS
+    POTENTIAL_FILE_NAME ${BASIS_POT_PATH}/GTH_POTENTIALS
+    &MGRID
+      CUTOFF [Ry]       500
+      NGRIDS            4
+      REL_CUTOFF [Ry]   60
+    &END MGRID
+
+    &QS
+      EPS_DEFAULT 1.0E-14    # def=1.0E-10
+      EXTRAPOLATION ASPC     #Extrapolation strategy for the wavefunction during MD
+      #EXTRAPOLATION_ORDER 3 #Default is 3
+      @IF ${USE_GPAW}
+          METHOD GAPW          # Gaussian Augumented Plane Waves
+          QUADRATURE   GC_LOG  # Algorithm to construct the atomic radial grid for GAPW
+          EPSFIT       1.E-4   # Precision to give the extension of a hard gaussian
+          EPSISO       1.0E-12 # Precision to determine an isolated projector
+          EPSRHO0      1.E-6   # Precision to determine the range of V(rho0-rho0soft)
+          # LMAXN0       4
+          # LMAXN1       6
+          # ALPHA0_H     10 # Exponent for hard compensation charge
+      @ENDIF
+    &END QS
+
+    &SCF
+      EPS_SCF 1.0E-7 # def=1.0E-5 the exponent should be half of EPS_DEFAULT
+      MAX_SCF 50   # def=50
+      &OUTER_SCF
+        EPS_SCF 1.0E-7 # def=1.0E-5
+        MAX_SCF 50
+      &END OUTER_SCF
+      &OT
+        PRECONDITIONER FULL_SINGLE_INVERSE
+        MINIMIZER DIIS
+      &END OT
+    &END SCF
+
+    &XC
+
+      &XC_FUNCTIONAL PBE
+          &PBE
+                PARAMETRIZATION REVPBE
+          &END PBE
+      &END XC_FUNCTIONAL
+      
+      @IF ${USE_SMOOTH}
+      &XC_GRID
+         XC_SMOOTH_RHO  NN50
+         XC_DERIV       NN50_SMOOTH
+      &END XC_GRID
+      @ENDIF
+        
+      @IF ${VDW}
+      &vdW_POTENTIAL
+        DISPERSION_FUNCTIONAL PAIR_POTENTIAL
+        &PAIR_POTENTIAL
+          TYPE DFTD3
+          CALCULATE_C9_TERM .TRUE. # Include the 3-body term
+          REFERENCE_C9_TERM .TRUE. #
+          # KIND_COORDINATION_NUMBERS   1 2
+          #LONG_RANGE_CORRECTION .TRUE.
+          PARAMETER_FILE_NAME ${BASIS_POT_PATH}/dftd3.dat
+          VERBOSE_OUTPUT .TRUE.
+          REFERENCE_FUNCTIONAL PBE
+          # R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
+          # EPS_CN 1.0E-6 #def=1e-6
+          D3_EXCLUDE_KIND 3 # Exclude the Na atom
+        &END PAIR_POTENTIAL
+      &END vdW_POTENTIAL
+      @ENDIF
+
+    &END XC
+
+    &PRINT
+        &MO_CUBES
+            &EACH
+              MD  200
+            &END EACH
+            NHOMO        2
+            NLUMO       10
+            WRITE_CUBE   FALSE
+        &END MO_CUBES
+    &END PRINT
+
+  &END DFT
+
+  &SUBSYS
+
+    &CELL
+      ABC [angstrom]     17.19 17.19 17.19
+    &END CELL
+
+    &TOPOLOGY
+      CONNECTIVITY OFF
+      COORD_FILE_FORMAT xyz
+      COORD_FILE_NAME   ./structure.xyz
+    &END TOPOLOGY
+
+    
+&KIND H
+  BASIS_SET TZV2P-GTH-q1
+  POTENTIAL GTH-PBE-q1
+&END KIND
+&KIND O
+  BASIS_SET TZV2P-GTH-q6
+  POTENTIAL GTH-PBE-q6
+&END KIND
+&KIND Na
+  BASIS_SET TZV2P-GTH-q9
+  POTENTIAL GTH-PBE-q9
+&END KIND
+&KIND Cl
+  BASIS_SET TZV2P-GTH-q7
+  POTENTIAL GTH-PBE-q7
+&END KIND
+    
+
+  &END SUBSYS
+
+&END FORCE_EVAL
+
+&MOTION
+  &MD
+    ENSEMBLE      NPT_I
+    STEPS             1000
+    TIMESTEP [fs]     0.5
+    TEMPERATURE [K]   673
+    &THERMOSTAT
+      TYPE CSVR
+      &CSVR
+        TIMECON [fs]  500
+      &END CSVR
+    &END THERMOSTAT
+    &BAROSTAT
+	   PRESSURE [bar]  1000
+       TIMECON  [fs]   100
+    &END BAROSTAT
+  &END MD
+
+  # COMVEL_TOL 1.0E-12 # Not good if we need to compute conductivity
+
+  &PRINT
+    &TRAJECTORY  SILENT
+      FILENAME =${SYSTEM}-1.xyz
+      &EACH
+        MD 1
+      &END EACH
+    &END TRAJECTORY
+
+    &FORCES  SILENT
+      FILENAME =${SYSTEM}-1.force
+      &EACH
+        MD 1
+      &END EACH
+    &END FORCES
+
+    &CELL  SILENT
+      FILENAME =${SYSTEM}-1.cell_xyz
+      &EACH
+        MD 1
+      &END EACH
+    &END CELL
+
+    &STRESS SILENT
+    	FILENAME =${SYSTEM}-1.stress
+        &EACH
+            MD 1
+        &END EACH
+    &END STRESS
+    &VELOCITIES SILENT
+        FILENAME =${SYSTEM}-1.vel
+        &EACH
+            MD 1
+        &END EACH
+    &END VELOCITIES
+    
+    &RESTART
+      FILENAME =${SYSTEM}-1.restart
+      &EACH
+        MD 1
+      &END EACH
+    &END RESTART
+    
+    &RESTART_HISTORY SILENT
+      &EACH
+        MD 50
+      &END EACH
+    &END RESTART_HISTORY
+  &END PRINT
+
+&END MOTION
+
+@if ${RESTART}
+&EXT_RESTART
+  RESTART_FILE_NAME initial.restart
+  RESTART_COUNTERS    T
+  RESTART_AVERAGES    T
+  RESTART_POS         T
+  RESTART_VEL         T
+  RESTART_THERMOSTAT  T
+  RESTART_BAROSTAT    T
+&END EXT_RESTART
+@endif
+            
