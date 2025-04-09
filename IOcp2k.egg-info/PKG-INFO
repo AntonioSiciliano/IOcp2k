@@ -1,0 +1,21 @@
+Metadata-Version: 2.4
+Name: IOcp2k
+Version: 0.1.0
+Summary: IO for cp2k MD
+Home-page: https://github.com/AntonioSiciliano/IOcp2k.git
+Author: Antonio Sicilinao
+Author-email: antonio.siciliano@ens.psl.eu
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: ase
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

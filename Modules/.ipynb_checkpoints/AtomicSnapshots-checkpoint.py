@@ -18,8 +18,8 @@ from matplotlib.ticker import MaxNLocator
 import AtomicSnap
 from AtomicSnap import AtomicSnapshots
 
-import Conductivity
-from Conductivity import Conductivity
+# import Conductivity
+from AtomicSnap import Conductivity
 
 import scipy
 
@@ -57,6 +57,7 @@ except:
 
 # Conversions
 BOHR_TO_ANGSTROM = 0.529177249 
+ANGSTROM_TO_BOHR = 1/BOHR_TO_ANGSTROM
 HA_TO_EV = 27.2114079527
 HA_TO_KELVIN = 315775.326864009
 HA_BOHR_TO_EV_ANGSTROM   = HA_TO_EV / BOHR_TO_ANGSTROM
@@ -69,6 +70,10 @@ BAR_TO_HA_BOHR3 = BAR_TO_GPA * HABOHR3_TO_GPA**-1
 
 # Velocities
 ANG_FEMPTOSEC_TO_HA = 0.04571028907825843
+
+# Dipoles
+DEBEYE_TO_eANG = 0.20819433622621247
+DEBEYE_TO_AU = DEBEYE_TO_eANG * ANGSTROM_TO_BOHR
 
 class AtomicSnapshots:
     """
@@ -124,6 +129,10 @@ class AtomicSnapshots:
         self.temperatures = None
         self.cons_quant = None
         self.velocities = None
+        # Dipole moments with berry phase in ATOMIC UNITS so BOHR
+        self.dipoles = None
+        self.dipoles_quantum = None
+        self.dipoles_origin = None
         # the time step in FEMPTOSEC
         self.dt = -1
         # The type of the calculation
@@ -144,7 +153,7 @@ class AtomicSnapshots:
     def init(self, file_name_head, unit_cell, debug = False, verbose = True, calc_type = 'GEO_OPT',
                    ext_pos = None, ext_force = None,
                    ext_stress = None, ext_vel = None,
-                   ext_ener = None, ext_cell = None):
+                   ext_ener = None, ext_cell = None, ext_dipoles = None):
         """
         READ XYZ FILE AS CREATED BY CP2K
 
@@ -164,13 +173,14 @@ class AtomicSnapshots:
             -unit_cell: np.array with the cell shape in ANGSTROM, lattice vectors are the rows.
             -debug: bool,
             -verbose: bool,
-            -calc_type: it is needed to understand which calculation was done
-            -ext_pos: the extension of the position file
-            -ext_force: the extension of the force file
-            -ext_stress: the extension of the stress file
-            -ext_velocities: the extension of the velocities file
-            -ext_ener: the extension of the energ file
-            -ext_cell: the extension of the cell file
+            -calc_type: strg, it is needed to understand which calculation was done
+            -ext_pos: strg, the extension of the position file
+            -ext_force: strg, the extension of the force file
+            -ext_stress: strg, the extension of the stress file
+            -ext_velocities: strg, the extension of the velocities file
+            -ext_ener: strg, the extension of the energ file
+            -ext_cell: strg, the extension of the cell file
+            -ext_dipoles: strg, the extension of the dipoles file
         """ 
         # Set up the unit cell in Angstrom
         self.unit_cell = np.copy(unit_cell)
@@ -221,11 +231,18 @@ class AtomicSnapshots:
         self.stresses = np.zeros((self.snapshots, 3, 3))
         # Velocities BOHR/AU TIME
         self.velocities = np.zeros((self.snapshots, self.N_atoms, 3))
+        
         # Kinetic and potential energy in HARTREE
         self.kinetic_energies   = np.zeros(self.snapshots)
         self.potential_energies = np.zeros(self.snapshots)
         # Temperature in KELVIN
         self.temperatures = np.zeros(self.snapshots)
+
+        # Dipoles are in ATOMIC UNITS units
+        self.dipoles    = np.zeros((self.snapshots, 3))
+        self.dipoles_quantum    = np.zeros((self.snapshots, 3, 3))
+        # Dipole orgini in ANGSTROM
+        self.dipoles_origin = np.zeros((self.snapshots, 3))
         
         
         # Read the atomic positions of each snapshots
@@ -375,6 +392,38 @@ class AtomicSnapshots:
                 self.dt = float(self.dt)
             # close the file
             file_ener.close()
+        ####### END READ THE ENER FILE ########
+
+
+        ####### READ THE DIPOLE FILE ########
+        if not(ext_dipoles is None):
+            
+            if not os.path.exists(file_name_head + ext_dipoles):
+                raise ValueError('I do not find the dipoles file {}'.format(file_name_head + ext_dipoles))
+            # Open the target file
+            file_dipoles = open(file_name_head + ext_dipoles, 'r')
+            lines = file_dipoles.readlines()
+
+            for isnap in range(self.snapshots):
+                index = (isnap + 1) * 10 + 9
+
+                # DEBYE TO ATOMIC UNITS
+                self.dipoles[isnap, :] = np.array([float(lines[index].split()[1]),
+                                                   float(lines[index].split()[3]),
+                                                   float(lines[index].split()[5])]) * DEBEYE_TO_AU
+                # IN ANGSTROM as all the positions
+                self.dipoles_origin[isnap, :] = np.array([float(lines[index - 9].split()[-3]),
+                                                          float(lines[index - 9].split()[-2]),
+                                                          float(lines[index - 9].split()[-1])]) * BOHR_TO_ANGSTROM
+
+                # DEBYE TO ATOMIC UNITS x, y, z along eahc row
+                self.dipoles_quantum[isnap, :, :] = np.array([[float(lines[index - 4].split()[2]), float(lines[index - 4].split()[3]), float(lines[index - 4].split()[4])],
+                                                              [float(lines[index - 3].split()[1]), float(lines[index - 3].split()[2]), float(lines[index - 3].split()[3])],
+                                                              [float(lines[index - 2].split()[2]), float(lines[index - 2].split()[3]), float(lines[index - 2].split()[4])]]) * DEBEYE_TO_AU
+                                                
+                
+            # close the file
+            file_dipoles.close()
         ####### END READ THE ENER FILE ########
 
 
