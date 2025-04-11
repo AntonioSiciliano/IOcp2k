@@ -13,13 +13,15 @@ import os, sys
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.ticker import MaxNLocator
+from   matplotlib.ticker import MaxNLocator
 
 import AtomicSnap
 from AtomicSnap import AtomicSnapshots
 
 # import Conductivity
 from AtomicSnap import Conductivity
+
+from AtomicSnap import Vibrational
 
 import scipy
 
@@ -241,7 +243,7 @@ class AtomicSnapshots:
         # Dipoles are in ATOMIC UNITS units
         self.dipoles    = np.zeros((self.snapshots, 3))
         self.dipoles_quantum    = np.zeros((self.snapshots, 3, 3))
-        # Dipole orgini in ANGSTROM
+        # Dipole orgin in ANGSTROM
         self.dipoles_origin = np.zeros((self.snapshots, 3))
         
         
@@ -424,6 +426,10 @@ class AtomicSnapshots:
                 
             # close the file
             file_dipoles.close()
+
+            # self.refold_all_dipoles(Nmax = 10, tol = 1.0, debug = False, debug_visualize = False)
+
+                    
         ####### END READ THE ENER FILE ########
 
 
@@ -460,7 +466,8 @@ class AtomicSnapshots:
         return 
 
 
-    
+
+            
 
 
     def create_ase_snapshots(self, wrap_positions, subtract_com, pbc = True):
@@ -1413,14 +1420,168 @@ class AtomicSnapshots:
         return D_results
 
 
-    def get_conductivity(self, t_ini = 2.5):
+    def get_conductivity(self, types_q = {"Na" : +1, "Cl" : -1}, 
+                         time_window = None,
+                         use_julia = False, python_normalize = True,
+                         pad = True, omega_sigma = [0, 5000], smearing = None, save_jj = False,
+                         test = True,
+                         ase_atoms_file = 'ase_cond.xyz'):
         """
         GET THE CONDUCTIVITY
+        =====================
+
+        First we  compute the current current correlation function both in time and frequency
+
+        then we compute the integral, i.e. the DC conductivity from
+
+        ..math:: \sigma = \frac{1}{3 V k T} \int dt \left\langle J(t) J(0) \right\rangle
+
+        This should coincide with
+
+        ..math:: \sigma = \sigma(\omega=0)
+
+
+        Parameters:
+        -----------
+            -types_q: dict with the atomic types and the ox charges
+            
+            -time_window: list, the initial and final time for sampling in PICOSECONDS
+
+            -Nmax: int, the max integer to add/subtract to the dipoles to refold them
+            -tol_refold: float, the tolerance to consider the dipoles snapshots continuous
+            -debug_refold: bool, if True we print the refolding details
+            
+            -use_julia: bool, if True the dipole dipole correlation fucntion is computed using the Windowed average in JULIA
+            -python_normalize: bool, if True the FFT is normalized so it coicides with the windowed average of Julia
+
+            -pad: bool
+            -omega_ir: list, the range to plot in cm-1
+            -smearing: float the smaering in cm-1 for plotting the IR spectra
+            -save_ir: bool, if True we save the IR spectra as a json file
+
+            -test: bool: if True we compare the julia and python correlation functions
         """
+        if time_window is None:
+            index1 = 0
+            index2 = self.snapshots + 1
+            t_min = 0
+            t_max = self.snapshots * self.dt * 1e-3
+        else:
+            t_min, t_max = np.sort(np.asarray(time_window))
+            # Convert in FEMPTOSCEON ONLY TO GET THE INDICES
+            index1 = int(t_min * 1e+3/self.dt)
+            index2 = int(t_max * 1e+3/self.dt)
+
+        print("\n\n================= CONDUCTIVITY ANALYSIS from {:.2f} to {:.2f} ps =================".format(t_min, t_max))
+            
         # Prepare the ase atoms to be read
         ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = True, pbc = False)
-        index_ini = int(t_ini * 1e+3/self.dt)
-        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
+
+        # Set up the class
+        cond = Conductivity.Conductivity()
+        
+        # Give the dipoles and the time step
+        cond.init(ase_atoms = ase_atoms[index1: index2], dt = self.dt,
+                  T = np.average(self.temperatures[index1: index2]),
+                  types_q = types_q)
+
+        # Set the time correlations
+        cond.set_correlations(use_julia = use_julia, python_normalize = python_normalize)
+
+        # x1, res1 = cond.get_spectra(cond.correlations, delta = None, pad = False)
+
+        # x2, res2 = cond.get_spectra(cond.correlations, delta = None, pad = True)
+
+        # plt.plot(x1, res1)
+        # plt.plot(x2, res2)
+        # plt.show()
+
+        # Plot everyhting
+        cond.plot_correlation_function(omega_min_max = omega_sigma, smearing = smearing, pad = pad)
+
+        if test:
+            cond.test_implementation()
+
+        
+
+        
+
+    
+
+    def get_ir_spectra(self, time_window = None,
+                       Nmax = 5, tol_refold = 1.0, debug_refold = False,
+                       use_julia = False, python_normalize = False,
+                       omega_ir = [0, 5000], smearing = None, save_ir = False,
+                       test = False):
+        """
+        GET THE IR SPECTRA FROM DIPOLE-DIPOLE CORRELATION FUNCTION
+        ==========================================================
+
+        Parameters:
+        -----------
+            -time_window: list, the initial and final time for sampling in PICOSECONDS
+
+            -Nmax: int, the max integer to add/subtract to the dipoles to refold them
+            -tol_refold: float, the tolerance to consider the dipoles snapshots continuous
+            -debug_refold: bool, if True we print the refolding details
+            
+            -use_julia: bool, if True the dipole dipole correlation fucntion is computed using the Windowed average in JULIA
+            -python_normalize: bool, if True the FFT is normalized so it coicides with the windowed average of Julia
+
+            -omega_ir: list, the range to plot in cm-1
+            -smearing: float the smaering in cm-1 for plotting the IR spectra
+            -save_ir: bool, if True we save the IR spectra as a json file
+
+            -test: bool: if True we compare the julia and python correlation functions
+        """
+        if time_window is None:
+            index1 = 0
+            index2 = self.snapshots + 1
+            t_min = 0
+            t_max = self.snapshots * self.dt * 1e-3
+        else:
+            t_min, t_max = np.sort(np.asarray(time_window))
+            # Convert in FEMPTOSCEON ONLY TO GET THE INDICES
+            index1 = int(t_min * 1e+3/self.dt)
+            index2 = int(t_max * 1e+3/self.dt)
+
+        
+        print("\n\n================= VIBRATIONAL ANALYSIS from {:.2f} to {:.2f} ps =================".format(t_min, t_max))
+        
+        # First we refold the dipoles
+        self.refold_all_dipoles(Nmax = Nmax, tol = tol_refold, debug = debug_refold)
+
+        # Set up the class
+        vibrations = Vibrational.Vibrational()
+        
+        # Give the dipoles and the time step
+        vibrations.init(self.dipoles[index1:index2], self.dt)
+        
+        # Get the dipole-dipole time correlation function
+        vibrations.set_dipole_dipole_correlation_function(use_julia = use_julia, python_normalize = python_normalize)
+        
+        # Plot the results
+        vibrations.plot_results(omega_min_max = omega_ir, delta = smearing, save_data = save_ir)
+
+        if test:
+            vibrations.test_implementation()
+        
+
+    
+    def refold_all_dipoles(self, Nmax = 10, tol = 1.0, debug = False):
+        """
+        REFOLD ALL THE DIPOLES USING MULTIPLES OF BERRY QUANTUM
+        =======================================================
+
+        If the component i of the dipoles is discontinous we add (or subtract) a multiple integer of the trivial phase
+        """
+        cmps = ["X", "Y", "Z"]
+        # Refold the dipoles 
+        for cart in range(3):
+            print("\n\n\n   ========== REFOLDING {} ==========".format(cmps[cart]))
+            new_P = refold_dipole(self.dipoles[:,cart], self.dipoles_quantum[:,cart,cart],
+                                  Nmax = Nmax, tol = tol, debug = debug)
+            self.dipoles[:,cart] = np.copy(new_P)
         
         
 
@@ -1451,6 +1612,179 @@ def load_dict_from_json(json_file_name):
         dictionary = json.load(file)   
     
     return dictionary
+
+
+def refold_dipole(P, cell, Nmax = 1, tol = 1.0, debug = True):
+    """
+    REFOLD THE DIPOLES USING INTEGER MULTIPLES OF THE BERRY QUANTUM OF POLARIZATION
+    ===============================================================================
+
+    For every P[i], very simply we check if the difference |P[i] - P[i-1]| is to large. 
+    If so, we subtract/add multiple integers of the quantum of polarization to P[i] 
+    
+    Parameters:
+    -----------
+        -P:    np.array with shape N, the dipoles along a given axis x, y, z for a trajectory of size N
+        -cell: np.array with shape N, the Berry quantum along the given axis for a trajectory of size N
+        -Nmax: int, the integer number we multiply the quantum of polarization to have a continuous function
+        -tol: float, the tolerance which we use to tell if the dipoles are continuous or not
+        -debug: bool
+
+    Returns:
+    --------
+        -Pini: np.array with shape N, the CONTINUOUS dipoles along a given axis x, y, z for a trajectory of size N
+        
+    """
+    # The dipoles we manipulate
+    Pini = np.copy(P)
+    # Get the size of the trajectory
+    trajectory_size = len(P)
+    
+    all_failure = []
+    for i in range(1, trajectory_size):
+        
+        delta = np.abs(Pini[i] - Pini[i-1])
+        if delta > tol:
+            all_failure.append(i)
+            Pold = np.copy(Pini[i])
+
+            for integer in range(-Nmax, +Nmax + 1):
+                Pnew = Pold + integer * cell[i]
+                new_delta = np.abs(Pnew - Pini[i-1])
+                if new_delta < tol:
+                    if debug:
+                        print("     INDEX {} delta {:.1f} solved with delta {:.1f} @ step {}".format(i, delta, new_delta, integer))
+                        print(Pini[i], Pnew)
+                    Pini[i] = np.copy(Pnew)
+                    # Get out from this loop
+                    break
+                    
+    if debug:
+        plt.plot(P, label = "BEFORE")
+        plt.plot(Pini, ls = ":", label = "AFTER")
+        plt.legend()
+        plt.show()
+
+    return Pini
+                
+
+
+# def OLDrefold_dipole(P, cell, Nmax = 1, tol = 1.0, debug = True, debug_visualize = False):
+#     """
+#     REFOLD THE DIPOLES USING INTEGER MULTIPLES OF THE BERRY QUANTUM OF POLARIZATION
+#     ===============================================================================
+
+#     1) We identify all the intervals where the dipole is discontinuous
+#     2) For each of these ranges, we try to add the quantum time -Nmax, -(Nmax-1), .., 0, 1, .. +Nmax
+
+#     Note: array[i1:i2] select the indices from i1 to i2-1
+    
+#     Parameters:
+#     -----------
+#         -P:    np.array with shape N, the dipoles along a given axis x, y, z for a trajectory of size N
+#         -cell: np.array with shape N, the Berry quantum along the given axis for a trajectory of size N
+#         -Nmax: int, the integer number we multiply the quantum of polarization to have a continuous function
+#         -tol: float, the tolerance which we use to tell if the dipoles are continuous or not
+#         -debug: bool
+#         -debug_visualize: bool, if True the code outputs some plots
+
+#     Returns:
+#     --------
+#         -Pini: np.array with shape N, the CONTINUOUS dipoles along a given axis x, y, z for a trajectory of size N
+        
+#     """
+#     # The dipoles we manipulate
+#     Pini = np.copy(P)
+#     # Get the size of the trajectory
+#     trajectory_size = len(P)
+
+#     # First check all the differences
+#     #differences = np.zeros(trajectory_size, dtype = float)
+#     differences = np.abs(Pini[:-1] - Pini[1:])
+#     # If they are all smaller than a given treshold we assume no jumps
+#     if np.all(differences < tol):
+#         print("Nothing to do. Everthing is continuous")
+#         return P
+#     else:
+#         # Check where the differences are larger than tol
+#         mask = np.where(differences > tol)[0]
+            
+#         # Reshape the indices and check if len(mask) is an integer multiple of 2
+#         even = True
+#         try:
+#             # The number of discontinuous parts 
+#             N_disc = len(mask)//2
+#             mask = np.asarray(mask).reshape((N_disc, 2))
+#         except:
+#             # Maybe the very last bit is discontinous,
+#             # so we append to the mask the very last index of the trajectory
+#             mask = np.append(mask, trajectory_size - 1)
+#             N_disc = len(mask)//2
+#             mask = np.asarray(mask).reshape((N_disc, 2))
+#             even = False
+
+#         if debug:
+#             print("The inidices where the differences were large")
+#             print(mask)
+#             print("{} discontinous regiond found. The tol is {}. Even {}\n".format(N_disc, tol, even))
+#         for i in range(N_disc):
+#             if debug:
+#                 print("Range {} the min-max indices are {}".format(i, mask[i]))
+#         # We will make continuous each range where the dipoles are discontinuous
+#         continuous = [False] * N_disc
+
+#         for i in range(N_disc):
+#             # Get all the indices from min to max, 
+#             # np.arange create mask[i,0], mask[i,0] + 1, ... mask[i,1] -1
+#             # WITH THE +1 WE CONSIDER FROM mask[i,01 + 1 to mask[i,1] INCLUDED
+#             indices = np.arange(mask[i,0], mask[i,1])  #+ 1
+#             if debug:
+#                 print("\nTrying to fix the interval #{} from {} to {}".format(i, indices[0], indices[-1]))
+#             # Loop over integer numbers
+#             for integer in range(-Nmax, Nmax + 1):
+#                 if debug:
+#                     print("Trying with {}".format(integer))
+#                 # Store the value of the dipoles before the shift
+#                 Pini0 = np.copy(Pini)
+#                 # Now shift the values of the dipoles by the Berry quantum
+#                 Pini[indices] += integer * cell[indices]
+#                 if debug_visualize:
+#                     plt.plot(np.arange(trajectory_size), Pini)
+#                     plt.plot(np.arange(trajectory_size)[indices], Pini[indices], color = "red")
+#                     plt.show()
+#                 # Check again the differences IN THE CURRENT RANGE 
+#                 if not even and i == N_disc - 1:
+#                     if debug:
+#                         print('ANALYZING {} {}'.format(indices[0], indices[-1]))
+#                     differences = np.abs(Pini[:-1] - Pini[1:])[indices[0]-1:indices[-1]]
+#                 else:
+#                     if debug:
+#                         print('ANALYZING {} {}'.format(indices[0], indices[-1]))
+#                     differences = np.abs(Pini[:-1] - Pini[1:])[indices]
+                
+#                 # If it is continuous IN THE CURRENT RANGE then we break the integer loop
+#                 if np.all(differences < tol):
+#                     if debug:
+#                         print("The dipole is continous with {} max diff {:.2e}\n".format(integer,differences.max()))
+#                     continuous[i] = True
+                    
+#                     break
+#                 # Otherwise we restore the initial value of the dipole and we keep going
+#                 else:
+#                     if debug:
+#                         print("The dipole is NOT continous with {} max diff {:.2e}".format(integer, differences.max()))
+#                     # restore the original values
+#                     Pini = np.copy(Pini0)
+#                     # This range i is not continous
+#                     continuous[i] = False
+
+#         if debug:
+#             print("\n\nFINAL RESULTS")
+#             print(continuous)
+#         if not np.all(np.asarray(continuous) == True):
+#             raise ValueError("The dipoles are not continous try to increase Nmax")
+
+#         return Pini
 
 
 def transform_voigt(tensor, voigt_to_mat = False):

@@ -2,6 +2,7 @@ setup.py
 Modules/AtomicSnapshots.py
 Modules/Conductivity.py
 Modules/MDBunches.py
+Modules/Vibrational.py
 Modules/__init__.py
 Modules/test.py
 iocp2k.egg-info/PKG-INFO

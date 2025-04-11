@@ -42,6 +42,8 @@ ANG_PS_TO_SI = 1e+2
 KELVIN_TO_EV = 8.6173e-5
 _e_charge_ = 1.602176634
 
+THZ_TO_CM = 33
+
 matplotlib.use('tkagg')
 class Conductivity:
     """
@@ -94,7 +96,7 @@ class Conductivity:
         for key in kwargs:
             self.__setattr__(key, kwargs[key])
         
-    def init(self, ase_atoms = None, dt = 0.5, T = 300, types_q = {"Na" : +1, "Cl" : -1}):
+    def init(self, ase_atoms = None, dt = 0.5, T = 300, V = 15**3, types_q = {"Na" : +1, "Cl" : -1}):
         """
         INITIALIZE
         ==========
@@ -165,6 +167,8 @@ class Conductivity:
         SELECT ATOMIC INDICES FROM ASE ATOMS
         ====================================
 
+        Select the atoms using the dictioanry self.types_q
+
         Parameters:
         -----------
             -index: int, the index of the corresponding atoms object
@@ -177,7 +181,7 @@ class Conductivity:
         # Get the total number of atoms
         N_at_tot = len(self.atoms[index].positions[:,0])
         
-        # Get all the chemical symbols
+        # Get all the chemical symbols as array
         chem_symb = np.asarray(self.atoms[index].get_chemical_symbols()).ravel()
         
         # Select only the atoms I want
@@ -199,7 +203,7 @@ class Conductivity:
 
         return selected_atoms, selected_qs
 
-    def get_current_from_ase_atoms(self, index, debug = False, subtract_vcom =True, return_volume = False):
+    def get_current_from_ase_atoms(self, index, debug = False, subtract_vcom = True, return_volume = False):
         """
         GET THE CURRENT
         ===============
@@ -244,37 +248,57 @@ class Conductivity:
             
         return J_all
 
-    def get_time_correlation_fft(self):
+    def get_time_correlation_fft(self, normalize = False):
         """
         RETURN THE TIME CORREALTION FUNCTION USING FFT
         ==============================================
-        ======
+
+        Alternative implementation of the windowed average to get the time correlation function
+
+        Here we use scipy FFT and IFFT. 
+        
+        We use the padding of the signal, i.e. we double the trajectory and we set the second half to zero
+
+        Parameters:
+        -----------
+            -normalize: bool, if True we impose the normalization, useful to compare with the Julia implementation
+
+        Returns:
+        --------
+            -C_t_real: np.array with shape self.N: the time correaltion function of the dipole
         """
+        print(' We compute the dipole dipole time correlation function using PYTHON FFT!')
         # Duplicate in size but set all zeros
-        new_js = np.zeros((2 * self.N, 3), dtype = type(self.js[0,0]))
+        j = np.zeros((2 * self.N, 3), dtype = type(self.js[0,0]))
+        
         # Set the inital values and the others will be zeros
-        new_js[:self.N,:] = self.js[:,:]
+        j[:self.N,:] = self.js[:,:]
         
         # The J J correlation in Fourier
-        J_omega  = scipy.fft.fft(new_js[:,:], axis = 0)
+        j_omega  = scipy.fft.fft(j[:,:], axis = 0)
         
         # Get the modulus squre and perform the dot product
-        J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
+        j2_omega = np.einsum('ia, ia -> i', np.conjugate(j_omega), j_omega)
         
         # Perform the inverse Fourier transform
-        C_t = scipy.fft.ifft(J2_omega)
+        C_t = scipy.fft.ifft(j2_omega)
 
         # Check the imaginary part
         if np.imag(C_t).max() > 1e-5:
-            print("Discarting imaginary part...")
-        # Apply the normalization
-        normalization = np.arange(self.N, 0, -1)
-        
-        C_t_real = np.real(C_t)[:self.N] /normalization
+            warnings.warn(" WARNING: Discarting imaginary part...")
+
+        if normalize:
+            # Apply the normalization (USE only to compare 
+            print(' Normalizing the correlation function\n')
+            normalization = np.arange(self.N, 0, -1)
+            C_t_real = np.real(C_t)[:self.N] /normalization
+        else:
+            print(' NOT normalizing the correlation function\n')
+            C_t_real = np.real(C_t)[:self.N]
         
         return C_t_real
 
-    def get_current_current_correlation_function(self, use_julia = True):
+    def set_correlations(self, use_julia = False, python_normalize = False):
         """
         GET THE CURRENT CURRENT AUTOCORRELATION FUNCTION
         ================================================
@@ -287,22 +311,91 @@ class Conductivity:
             # Get the julia windowed average (BRUTE FORCE)
             self.correlations, self.error_correlations = Main.get_time_correlation_vector(self.js, self.N)
         else:
-            pass
-            # self.correlations, self.error_correlations = self.get_time_correlation_fft()
-    
+            # Use pyhon
+            self.correlations = self.get_time_correlation_fft(normalize = python_normalize) 
+            self.error_correlations = np.zeros(self.N)
+
+        # Get the average volum in ANGSTROM3
         self.V = np.average(self.volumes)
 
 
-    def plot_current_current_correlation_function(self):
+    def get_spectra(self, correlations, delta = None, pad = False):
+        """
+        GET THE CORRELATION FUNCTION SPECTRA
+        ====================================
+
+        We comnpute the IR spectra from the expressions
+
+        ..math: \sigma(\omega) = \frac{1}{3 k T V} \int dt \exp{i\omega t} \left\langle j(t) j(0) \right\rangle
+
+        Parameters:
+        -----------
+            -correlations: np.array: the time correlations
+            
+        Returns:
+        --------
+            -omega: np.array, the frequenceis in cm-1
+            -sigma_spectra: np.array, the intensity of the sigma spectra
+            -delta: the smearing in cm-1
+            -pad: bool if True we pad the correlations in input
+        """
+        print("\n\nC[OMEGA] | We are computing the dynamical conductivity!")
+        # Get the leght of the time correlation
+        length = len(correlations)
+        
+        # The fft has dimension (eAngstrom)^2
+        new_correlations = np.zeros(length * 2, dtype = type(correlations[0]))
+
+        if pad:
+            print("C[OMEGA] | PAD")
+            new_correlations[:length] = correlations[:]
+            new_correlations[0] = 0.5 * new_correlations[0]
+        else:
+            print("C[OMEGA] | NO PAD")
+            new_correlations[:length] = correlations[:][::-1]
+            new_correlations[length:] = correlations[:]
+            new_correlations[0] = 0.5 * new_correlations[0]
+
+            
+
+        # Picosecond
+        t = np.arange(2 * length) * self.dt
+        if delta is None:
+            print("C[OMEGA] | No smearing!\n")
+            sigma_omega  = scipy.fft.fft(new_correlations) 
+        else:
+            # Picoseconds
+            tau = 1/(delta * THZ_TO_CM**-1)
+            print("C[OMEGA] | Using a smearing of {:.2f} cm-1 {:.2f} ps\n".format(delta, tau))
+            sigma_omega  = scipy.fft.fft(new_correlations * np.exp(- 0.5 * t**2 /tau**2)) 
+        print()
+        
+        # The freq are in Thz
+        omega     = scipy.fft.fftfreq(2 * length, self.dt)
+        # Go in cm-1
+        omega *= THZ_TO_CM
+
+        sigma_spectra = np.real(sigma_omega) * 2 * np.pi/3
+
+        return omega, sigma_spectra
+
+
+
+
+    def plot_correlation_function(self, omega_min_max = [0, 5000], smearing = None, pad = False):
         """
         PLOT THE CURRENT CURRENT CORRELATION FUNCTION
         =============================================
         """
+        # FACTOR to GET THE CONDUCTIVITY IN Si/m ##########################
+        factor =  (1e+3 * _e_charge_) /(self.V * 3 * self.T * KELVIN_TO_EV)
+        ###################################################################
+
 
         if np.all(self.correlations == 0):
-            self.get_current_current_correlation_function()
+            self.set_correlations()
             
-        fig = plt.figure(figsize=(8, 8))
+        fig = plt.figure(figsize=(10, 5))
 
         gs = gridspec.GridSpec(1, 2, figure = fig)
         
@@ -316,126 +409,55 @@ class Conductivity:
         ax.tick_params(axis = 'both', labelsize = 12)
 
         ax = fig.add_subplot(gs[0,1])
-        ax.set_title("Current-current time correlation {}".format(self.types_q.keys()))
-        J_omega  = scipy.fft.fft(self.correlations[:], axis = 0)
-        omega    = scipy.fft.fftfreq(self.N, self.dt * 1e-12)
-        # PICOSCOND and ANGSTROM^2
-        ax.plot(omega, np.real(J_omega), lw = 3, color = "k")
+       
+        omega, sigma = self.get_spectra(self.correlations, delta = smearing, pad = pad)
+        if omega_min_max is None:
+            # PICOSCOND and ANGSTROM^2
+            ax.plot(omega, omega**2 * sigma, lw = 3, color = "purple")
+        else:
+            mask = (omega_min_max[0] < omega) & (omega < omega_min_max[1])
+            # PICOSCOND and ANGSTROM^2
+            ax.plot(omega[mask], (omega**2 * sigma)[mask], lw = 3, color = "purple")
+
+        print()
+        print("FOURIER | {} Si/m".format(sigma[0] * factor ))
+        print("INTEGRAL| {} Si/m".format(np.sum(self.correlations) * self.dt * factor))
+        print()
         
-        ax.set_xlabel('$\\omega$', size = 15)
+        ax.set_xlabel('$\\omega$ [cm$^{-1}$]', size = 15)
         ax.set_ylabel('$C_{JJ}(\\omega)$ [Angstrom$^2$/ps$^2$]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
-        # plt.legend()
         plt.tight_layout()
 
         plt.show()
 
 
-    def plot_sigma(self, up_to_t = None):
-        """
-        PLOT THE CONDUCTIVITY
-        =====================
-        """
-        if np.all(self.correlations == 0):
-            self.get_current_current_correlation_function()
-            
-        fig = plt.figure(figsize=(8, 8))
 
-        factor =  1e+3 * _e_charge_ /(self.V * 3 * self.T)
-
-        JJ_norm = self.correlations * factor
-        err_JJ_norm = self.error_correlations * factor
-
-        if up_to_t is None:
-            up_to_t = self.t[-1] /2
-
-        # Now integrate the conductivity
-        mask = self.t < up_to_t
-        integrated_sigma = np.sum(JJ_norm[mask]) * self.dt
-        
-        # Plot everyhing
-        gs = gridspec.GridSpec(1, 1, figure = fig)
-        ax = fig.add_subplot(gs[0,0])
-        ax.set_title("Conductivity for {}".format(self.types_q.keys()))
-        # PICOSCOND and ANGSTROM^2
-        ax.errorbar(self.t, JJ_norm, yerr = err_JJ_norm, lw = 3, color = "k")
-        ax.fill_between(self.t[mask], JJ_norm.min(), JJ_norm[mask], alpha=0.3, color='gray', label ='$\\sigma$' + '={:.1e} Si/m'.format(integrated_sigma))
-        ax.set_xlabel('Time [ps]', size = 15)
-        ax.set_ylabel('$\\frac{<J(t)J(0)>}{3VkT}$ [Si/(m ps)]', size = 12)
-        ax.tick_params(axis = 'both', labelsize = 12)
-        plt.legend(fontsize = 15)
-        plt.tight_layout()
-
-        plt.show()
-
-
-    def test_implementation2(self):
-        """
-        A TEST FUNCTION
-        ===============
-        """
-        new_js = np.zeros((2 * self.N, 3))
-        new_js[:self.N,:] = self.js[:,:]
-        # The J J correlation in Fourier
-        J_omega  = scipy.fft.fft(new_js[:,:], axis = 0)
-
-        # Get the square
-        J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
-        C_t = scipy.fft.ifft(J2_omega)
     
-        if np.imag(C_t).max() > 1e-5:
-            print("Discarting imaginary part...")
-        normalization = np.arange(self.N, 0, -1)
-        C_t_real = np.real(C_t[:self.N]) /normalization
-    
-        matplotlib.use('tkagg')
-        # Create base plot
-        fig, ax1 = plt.subplots()
-        
-        ax1.errorbar(self.t, self.correlations, yerr = self.error_correlations, lw = 3, color = "k", label = "Julia")
-        ax1.legend()
-        
-        ax2 = ax1#.twinx()
-        mask = self.t < self.t[-1]/2
-        ax2.plot(self.t, C_t_real, color = 'red', label = "python Fourier")
-        ax2.legend(loc = 'upper left')
-        plt.show()
+    # DEBUG
 
-
-        
     def test_implementation(self):
         """
         A TEST FUNCTION
         ===============
 
-        We compare the result of the windowed average in julia with FFT of python
+        Here we compare the correlation function obtained with Julia and the one of python using FFT
         """
-        # The J J correlation in Fourier
-        J_omega  = scipy.fft.fft(self.js[:,:], axis = 0)
         
-        # Get the modulus squre and perform the dot product
-        J2_omega = np.einsum('ia, ia -> i', np.conjugate(J_omega), J_omega)
-        
-        # Perform the inverse Fourier transform
-        C_t = scipy.fft.ifft(J2_omega)
-
-        # Check the imaginary part
-        if np.imag(C_t).max() > 1e-5:
-            raise ValueError("Discarting imaginary part...")
-        # Apply the normalization
-        normalization = np.arange(self.N, 0, -1)
-        # Get the final result
-        C_t_real = np.real(C_t) /normalization
-    
-        matplotlib.use('tkagg')
         # Create base plot
         fig, ax1 = plt.subplots()
-        
-        ax1.errorbar(self.t, self.correlations, yerr = self.error_correlations, lw = 3, color = "k", label = "Julia")
+
+        self.set_correlations(use_julia = False, python_normalize = True)
+        res1 = np.copy(self.correlations)
+        ax1.plot(self.t,self.correlations, lw = 3, color = "k", label = "Julia WINDOWED")
         ax1.legend()
-        
-        ax2 = ax1#.twinx()
-        mask = self.t < self.t[-1]/2
-        ax2.plot(self.t[mask], C_t_real[mask], color = 'red', lw = 3, ls = ":", label = "python Fourier")
-        ax2.legend(loc = 'upper left')
+
+        self.set_correlations(use_julia = True, python_normalize = True)
+        res2 = np.copy(self.correlations)
+        ax1.plot(self.t, self.correlations , color = 'red', lw = 2.0, label = "Python FFT")
+        ax1.legend(loc = 'upper left')
         plt.show()
+
+        if np.abs(res1[1:-1] -res2[1:-1]).max() > 10:
+            raise ValueError("The correlation function is not implemented correctly")
+

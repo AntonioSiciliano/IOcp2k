@@ -5,10 +5,10 @@ function get_time_correlation_vector(V, N)
     ===============================================================
     """
     
-    println("\n==>WELCOME TO JULIA...")
+    println("\n ==>WELCOME TO JULIA...")
     # println("WELCOME TO JULIA...")
     # println("Hello from Julia! x = ", typeof(V))
-    println("Computing the windowed average of a trajectory with size ", N)
+    println(" ==>Computing the windowed average of a trajectory with size ", N)
 
     # The correlations and the corresponding errors
     correlations = zeros(Float64, N)
@@ -33,6 +33,6 @@ function get_time_correlation_vector(V, N)
     end
 
     # println(" c", correlations)
-    println("\n==>CIAO CIAO JULIA...")
+    println("\n ==>BYE JULIA...")
     return correlations, error_correlations
 end
