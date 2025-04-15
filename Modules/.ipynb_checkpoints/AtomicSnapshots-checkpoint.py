@@ -389,7 +389,11 @@ class AtomicSnapshots:
                 self.potential_energies[isnap] = float(lines[isnap + 1].split()[4])
                 self.cons_quant[isnap]         = float(lines[isnap + 1].split()[5])
             if self.calc_type == 'MD':
-                self.dt = float(lines[2].split()[1]) - float(lines[1].split()[1])
+                try:
+                    self.dt = float(lines[2].split()[1]) - float(lines[1].split()[1])
+                except:
+                    print("Set anually the time step. The file is too short. Probably only one step was done.")
+                    self.dt = float(input("Please enter the dt: "))
                 print('Update the dt to {} fs'.format(self.dt))
                 self.dt = float(self.dt)
             # close the file
@@ -1249,6 +1253,9 @@ class AtomicSnapshots:
             MD_atoms_selected1 = MD_atoms.select_atoms('name {}'.format(atomic_pair[0]))
             # Select only the atomic type we want
             MD_atoms_selected2 = MD_atoms.select_atoms('name {}'.format(atomic_pair[1]))
+            # #  Wrap again the positions
+            # MD_atoms_selected1.wrap()
+            # MD_atoms_selected2.wrap()
 
             # Compute RDF
             rdf_calc = MDAnalysis.analysis.rdf.InterRDF(MD_atoms_selected1, MD_atoms_selected2,
@@ -1423,7 +1430,7 @@ class AtomicSnapshots:
     def get_conductivity(self, types_q = {"Na" : +1, "Cl" : -1}, 
                          time_window = None,
                          use_julia = False, python_normalize = True,
-                         pad = True, omega_sigma = [0, 5000], smearing = None, save_jj = False,
+                         pad = True, omega_ir = [0, 5000], smearing = None, save_jj = False,
                          test = True,
                          ase_atoms_file = 'ase_cond.xyz'):
         """
@@ -1446,10 +1453,6 @@ class AtomicSnapshots:
             -types_q: dict with the atomic types and the ox charges
             
             -time_window: list, the initial and final time for sampling in PICOSECONDS
-
-            -Nmax: int, the max integer to add/subtract to the dipoles to refold them
-            -tol_refold: float, the tolerance to consider the dipoles snapshots continuous
-            -debug_refold: bool, if True we print the refolding details
             
             -use_julia: bool, if True the dipole dipole correlation fucntion is computed using the Windowed average in JULIA
             -python_normalize: bool, if True the FFT is normalized so it coicides with the windowed average of Julia
@@ -1475,14 +1478,14 @@ class AtomicSnapshots:
         print("\n\n================= CONDUCTIVITY ANALYSIS from {:.2f} to {:.2f} ps =================".format(t_min, t_max))
             
         # Prepare the ase atoms to be read
-        ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = True, pbc = False)
+        ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = False, pbc = False)
 
         # Set up the class
         cond = Conductivity.Conductivity()
         
         # Give the dipoles and the time step
         cond.init(ase_atoms = ase_atoms[index1: index2], dt = self.dt,
-                  T = np.average(self.temperatures[index1: index2]),
+                  temperatures = self.temperatures[index1: index2],
                   types_q = types_q)
 
         # Set the time correlations
@@ -1497,7 +1500,7 @@ class AtomicSnapshots:
         # plt.show()
 
         # Plot everyhting
-        cond.plot_correlation_function(omega_min_max = omega_sigma, smearing = smearing, pad = pad)
+        cond.plot_correlation_function(omega_min_max = omega_ir, smearing = smearing, pad = pad, save_data = save_jj)
 
         if test:
             cond.test_implementation()
