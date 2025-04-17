@@ -21,7 +21,7 @@ try:
     __JULIA__ = True
 except:
     __JULIA__ = False
-    raise NotImplementedError("A pure python version is not available. Try to run it with python-jl")
+    print("Vibrational module| Sorry no Julia found. In case you want to use it try with python-jl")
 
 
 import matplotlib
@@ -32,7 +32,6 @@ matplotlib.use('tkagg')
 
 import AtomicSnap
 from AtomicSnap import AtomicSnapshots
-# from AtomicSnapshots.AtomicSnapshots import save_dict_to_json, load_dict_from_json
 
 import scipy, scipy.optimize, scipy.fft
 

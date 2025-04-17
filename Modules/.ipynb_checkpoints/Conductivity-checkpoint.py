@@ -21,7 +21,7 @@ try:
     __JULIA__ = True
 except:
     __JULIA__ = False
-    raise NotImplementedError("A pure python version is not available. Try to run it with python-jl")
+    print("Conductivity module | Sorry no Julia found. In case you want to use it try with python-jl")
 
 
 import matplotlib
@@ -166,7 +166,7 @@ class Conductivity:
         return V_com
 
         
-    def get_selected_atoms_qs(self, index):
+    def get_selected_atoms_qs(self, index, debug = False):
         """
         SELECT ATOMIC INDICES FROM ASE ATOMS
         ====================================
@@ -200,10 +200,11 @@ class Conductivity:
             selected_atoms.append(my_sel)
             # Get the corresponding oxidations charges
             selected_qs.append([self.types_q[target_atom]] * len(my_sel))
-            print(target_atom)
-            print(my_sel)
-            print([self.types_q[target_atom]] * len(my_sel))
-            print()
+            if debug:
+                print(target_atom)
+                print(my_sel)
+                print([self.types_q[target_atom]] * len(my_sel))
+                print()
             
         # Transform everything in array
         selected_atoms = np.asarray(selected_atoms).ravel()
@@ -211,7 +212,7 @@ class Conductivity:
 
         return selected_atoms, selected_qs
 
-    def get_current_from_ase_atoms(self, index, debug = False, subtract_vcom = True):
+    def get_current_from_ase_atoms(self, index, subtract_vcom = True, debug = False):
         """
         GET THE CURRENT
         ===============
@@ -231,7 +232,7 @@ class Conductivity:
             -J_all: np.array with shape (3), the total ionic current
         """
         # Select the atoms that contribute to the conductivity with the ox charges corresponind to them
-        selected_atoms, selected_qs = self.get_selected_atoms_qs(index)
+        selected_atoms, selected_qs = self.get_selected_atoms_qs(index, debug = debug)
         
         if debug:
             print('Selected atoms', chem_symb[selected_atoms])
@@ -259,7 +260,7 @@ class Conductivity:
         return J_all
 
     
-    def set_correlations(self, use_julia = False, python_normalize = False):
+    def set_correlations(self, use_julia = False, python_normalize = False, debug = False):
         """
         GET THE CURRENT CURRENT AUTOCORRELATION FUNCTION
         ================================================
@@ -273,7 +274,7 @@ class Conductivity:
         """
         # Range on all the snapshots to get the currents
         for i in range(self.N):
-            self.js[i,:]    = self.get_current_from_ase_atoms(i)
+            self.js[i,:]    = self.get_current_from_ase_atoms(i, debug = debug)
             self.volumes[i] = self.ase_atoms[i].get_volume()
 
         if use_julia and __JULIA__:
@@ -404,6 +405,8 @@ class Conductivity:
         First we plot the current current correlation function in time and frequency domani
 
         Secondly we plot the time integral of the current current correlation function to get the conductivity
+
+        # TODO add the conductivity calculation as a comulative integral
         """
         if np.all(self.correlations == 0):
             self.set_correlations()
@@ -460,6 +463,7 @@ class Conductivity:
             print("\nCONV = {}".format(conv))
             print("INTEGRAL up to t {:.1f} ps | {:.4f}    Si/m".format(tmax, sigma))
         print()
+        
         gs = gridspec.GridSpec(1, 2, figure = fig)
         ax = fig.add_subplot(gs[0,1])
         # PICOSCOND and Si/m

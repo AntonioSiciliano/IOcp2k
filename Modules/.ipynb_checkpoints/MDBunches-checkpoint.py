@@ -1,16 +1,16 @@
 import numpy as np
+
 import ase
-# from matplotlib.ticker import MaxNLocator
 from ase import Atoms
+
 import os, sys
-import matplotlib
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import AtomicSnap
-from AtomicSnap import AtomicSnapshots
+
 import copy
+
 import json
+
 import subprocess
+
 from datetime import datetime
 
 class AtomicBunches:
@@ -112,6 +112,9 @@ module load cp2k/2024.3\n
                           "_CUTOFF_" : 600, "_REL_CTOFF_" : 60, "_NGRIDS_" : 4, 
                           # GPAW
                           "_USE_GPAW_" : 1,
+                          # OT PARAMETERS
+                          "_OT_PRECONDITIONER_" : "FULL_SINGLE_INVERSE",
+                          "_OT_MINIMIZER_" : "DIIS",
                           # THE PARAMETERS OF THE STRUCTURE in ANGSTROM (IF RESTART IS 1 then this is override)
                           "_A_" : 0.0, "_B_" : 0.0, "_C_" : 0.0,
                           # If THERE NO RESTART FILE IS GIVEN THE SIMULATION WILL START FROM THIS STRUCTURE FILE
@@ -228,8 +231,8 @@ module load cp2k/2024.3\n
 
     &QS
       EPS_DEFAULT 1.0E-14    # def=1.0E-10
-      EXTRAPOLATION ASPC     #Extrapolation strategy for the wavefunction during MD
-      #EXTRAPOLATION_ORDER 3 #Default is 3
+      EXTRAPOLATION ASPC     # Extrapolation strategy for the wavefunction during MD
+      #EXTRAPOLATION_ORDER 3 # Default is 3
       @IF ${USE_GPAW}
           METHOD GAPW          # Gaussian Augumented Plane Waves
           QUADRATURE   GC_LOG  # Algorithm to construct the atomic radial grid for GAPW
@@ -244,14 +247,14 @@ module load cp2k/2024.3\n
 
     &SCF
       EPS_SCF 1.0E-7 # def=1.0E-5 the exponent should be half of EPS_DEFAULT
-      MAX_SCF 50   # def=50
+      MAX_SCF 50     # def=50
       &OUTER_SCF
         EPS_SCF 1.0E-7 # def=1.0E-5
-        MAX_SCF 50
+        MAX_SCF 50     # def=50
       &END OUTER_SCF
       &OT
-        PRECONDITIONER FULL_SINGLE_INVERSE
-        MINIMIZER DIIS
+        PRECONDITIONER _OT_PRECONDITIONER_ # Example FULL_SINGLE_INVERSE, FULL_KINETIC
+        MINIMIZER _OT_MINIMIZER_           # Example DIIS
       &END OT
     &END SCF
 
@@ -477,8 +480,8 @@ module load cp2k/2024.3\n
         MAX_SCF 50
       &END OUTER_SCF
       &OT
-        PRECONDITIONER FULL_SINGLE_INVERSE
-        MINIMIZER DIIS
+        PRECONDITIONER _OT_PRECONDITIONER_ # Example FULL_SINGLE_INVERSE, FULL_KINETIC
+        MINIMIZER      _OT_MINIMIZER_      # Example DIIS
       &END OT
     &END SCF
 

@@ -10,6 +10,10 @@ import ase.data
 import copy
 import os, sys
 
+import subprocess
+import json
+import scipy
+
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -17,22 +21,22 @@ from   matplotlib.ticker import MaxNLocator
 
 import AtomicSnap
 from AtomicSnap import AtomicSnapshots
-
-# import Conductivity
 from AtomicSnap import Conductivity
-
 from AtomicSnap import Vibrational
 
-import scipy
 
-import MDAnalysis
-import MDAnalysis.analysis
-import MDAnalysis.analysis.rdf
-import MDAnalysis.analysis.msd
+__MDANALYSIS__ = False
+try:
+    import MDAnalysis
+    import MDAnalysis.analysis
+    import MDAnalysis.analysis.rdf
+    import MDAnalysis.analysis.msd
+    __MDANALYSIS__ = True
+except:
+    __MDANALYSIS__ = False
+    print("No MD Analysis found\n")
 
-import subprocess
 
-import json
 
 __JULIA__ = False
 try:
@@ -500,9 +504,9 @@ class AtomicSnapshots:
         all_atoms = []
 
         print("\nCREATING ASE ATOMS SNAPSHOTS...")
-        print("Wrapping the positions? {}".format(wrap_positions))
-        print("Subtracting the center of mass positions? {}".format(subtract_com))
-        print("Setting PBC? {}\n".format(pbc))
+        print("1) Subtracting the center of mass positions? {}".format(subtract_com))
+        print("2) Wrapping the positions? {}".format(wrap_positions))
+        print("3) Setting PBC? {}\n".format(pbc))
 
         if subtract_com:
             # Get the center of mass positions (self.snaphsots, 3)
@@ -517,13 +521,14 @@ class AtomicSnapshots:
             stress     = -transform_voigt(self.stresses[isnap,:,:]) * HA_BOHR3_TO_EV_ANGSTROM3
             velocities = self.velocities[isnap,:,:] * BOHR_TO_ANGSTROM /AU_TIME_TO_PICOSEC
 
-            if wrap_positions:
-                positions = ase.geometry.wrap_positions(self.positions[isnap,:,:], self.unit_cells[isnap,:,:], pbc = True)
-            
             if subtract_com:
                 positions = np.copy(self.positions[isnap,:,:] - R_com[isnap,:])
             else:
                 positions = np.copy(self.positions[isnap,:,:])
+
+            if wrap_positions:
+                positions = ase.geometry.wrap_positions(positions[:,:], self.unit_cells[isnap,:,:], pbc = True)
+            
             
             # Create the ase atoms object
             structure = Atoms(self.types, positions)
@@ -842,7 +847,7 @@ class AtomicSnapshots:
         plt.show()
 
 
-    def plot_density_evolution(self, average_window = [0,-1], img_name = None):
+    def plot_density_evolution(self, average_window = [0,-1], img_name = None, save_rho_json = False, json_file_result = "time_rho.json"):
         """
         PLOT DENISTY EVOLUTION FROM MD
         ==============================
@@ -859,10 +864,10 @@ class AtomicSnapshots:
         fig = plt.figure(figsize=(7, 4))
         gs = gridspec.GridSpec(1,1, figure=fig)
 
-        # Time steps in PICOSECOND
+        # Time steps in FEMPTOSECOND
         x = np.arange(self.snapshots) * self.dt
 
-        # Get the total molar mass in g/mol
+        # Get the total molar mass in UMA 
         total_mass = np.sum(self.get_masses_from_types())
 
         # Get the volumes in ANGSTROM^3
@@ -875,8 +880,14 @@ class AtomicSnapshots:
         V_average = np.sum(volumes[average_window[0]: average_window[1]]) /N_samples
         V_err = np.sqrt(np.sum((volumes[average_window[0]: average_window[1]] - V_average)**2)) /N_samples
         
-        # Get the density in g/cm^3
-        rho = total_mass /(0.602214076 * volumes)
+        # Get the density from UMA/ANG3 in g/cm^3
+        # rho = total_mass  /(0.602214076 * volumes)
+        rho = total_mass * 1.660538 /volumes
+
+        if save_rho_json:
+            # Save the results to a json file
+            times_rho = {"t" : list(x), "rho" : list(rho)}
+            save_dict_to_json(json_file_result, times_rho)
         
         rho_av  = np.sum(rho[average_window[0]: average_window[1]]) /N_samples
         rho_err = np.sqrt(np.sum((rho[average_window[0]: average_window[1]] - rho_av)**2))/N_samples
@@ -1070,7 +1081,7 @@ class AtomicSnapshots:
         GET THE MASSES FOR ALL THE ATOMS IN THE SNAPSHOTS
         =================================================
 
-        Use units of ASE
+        Use units of ASE so UMA
         """
         # Get the masses
         masses_array = np.zeros(self.N_atoms)
@@ -1175,7 +1186,7 @@ class AtomicSnapshots:
         return
 
 
-    def get_pair_correlation_functions(self, selected_atoms, t_ini = 2.5, my_r_range = (0.01, 6.0), bins = 500,
+    def get_pair_correlation_functions(self, selected_atoms, t_range = None, my_r_range = (0.01, 6.0), bins = 500,
                                        ase_atoms_file = "atoms_gr.xyz", save_ase_atoms_file = False, wrap_positions = True, use_pbc = True,
                                        json_file_result = "pair_corr_function.json" , show_results = True, save_plot = False):
         """
@@ -1189,7 +1200,7 @@ class AtomicSnapshots:
         -----------
             -selected_atoms: list, list of atomic types for which we compute the pair correlation function
             
-            -t_ini: float, the equilibration time PIDCOSECOND. After t_ini we will start the sampling
+            -t_range: list of float, the time window  in PIDCOSECOND. In this widow compute the averages.
             
             -my_r_range: tuple, the minimum and maximum value for r in ANGSTROM
             -bins: int, the number of r values
@@ -1210,6 +1221,9 @@ class AtomicSnapshots:
             -g_results: a dictionary containing as items the atomic pair types with r and g(r)
         """
         matplotlib.use('tkagg')
+        # Check if there is MD analysis
+        if not __MDANALYSIS__:
+            raise NotImplementedError("We need MDAnalysis to run the pair correlation function calculations")
         
         # If there are no selected atoms we compute the MSD and D for all the atomic types
         print("\n\n========PAIR CORRELATION FUNCTION with MDanalysis========")
@@ -1223,8 +1237,17 @@ class AtomicSnapshots:
 
         # Prepare the ase atoms to be read
         ase_atoms = self.create_ase_snapshots(wrap_positions = wrap_positions, subtract_com = False, pbc = use_pbc)
-        index_ini = int(t_ini * 1e+3/self.dt)
-        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
+        
+        if t_range is None:
+            index_ini = int(self.snapshots //2)
+            index_fin = int(self.snapshots)
+            # Get the range of times in PICOSECONDS
+            t_range = np.asarray([index_ini, index_fin]) * self.dt * 1e-3
+        else:
+            t_range = np.sort(t_range)
+            index_ini = int(t_range[0] * 1e+3/self.dt)
+            index_fin = int(t_range[1] * 1e+3/self.dt)
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin])
 
         # A dictionary with atom types and the corresponding diffusion constant and error
         g_results = {}
@@ -1240,7 +1263,7 @@ class AtomicSnapshots:
             else:
                 gs = gridspec.GridSpec(len(selected_atoms)//2, 2, figure = fig)
 
-        print("Setting the cell dimension and the time step...")
+        print("Setting the cell dimension and the time step (this might take a while)...")
         for snapshot, MD_atoms_snapshot in enumerate(MD_atoms.trajectory):
             # Manually set the unit cell dimensions in ANGSTROM
             MD_atoms_snapshot.dimensions = [self.unit_cells[snapshot,0,0], self.unit_cells[snapshot,1,1], self.unit_cells[snapshot,2,2], 90.0, 90.0, 90.0]  
@@ -1248,7 +1271,7 @@ class AtomicSnapshots:
             MD_atoms_snapshot.dt = self.dt* 1e-3
 
         for index, atomic_pair in enumerate(selected_atoms):
-            print('\nRDF for {} {} after equilibration of {} ps'.format(atomic_pair[0], atomic_pair[1], t_ini))
+            print('\nRDF for {} {} from {:.1f} to {:.1f} ps'.format(atomic_pair[0], atomic_pair[1], t_range[0], t_range[1]))
             # Select only the atomic type we want
             MD_atoms_selected1 = MD_atoms.select_atoms('name {}'.format(atomic_pair[0]))
             # Select only the atomic type we want
@@ -1289,7 +1312,7 @@ class AtomicSnapshots:
         return g_results
 
 
-    def get_diffusion_constant(self, t_ini = 2.5, time_windows = None, subtract_com = True, selected_atoms = None,
+    def get_diffusion_constant(self, t_range = None, time_windows = None, subtract_com = True, selected_atoms = None,
                                ase_atoms_file = "atoms_msd.xyz", save_ase_atoms_file = False,
                                json_file_result = "self_diffusion.json" , show_results = True, save_plot = False):
         """
@@ -1302,9 +1325,9 @@ class AtomicSnapshots:
 
         Parameters:
         -----------
-            -t_ini: float, the initial equilibration time, i.e. after t_ini we start sampling
+            -t_range: list of float, the time window  in PIDCOSECOND. In this widow compute the averages.
 
-            -time_windows: list
+            -time_windows: list of float, the time window in PICOSECOND for the fit of the MSD
             
             -subtract_com: bool, if true we subtract the center of mass positions to the all atomic positions in the snapshots
             -selected_atoms: list, list of atomic types for which we compute the self diffusion constant
@@ -1322,7 +1345,9 @@ class AtomicSnapshots:
             -D_results: a dictionary containing as items the atomic types with diffusion constants and its error
         """
         matplotlib.use('tkagg')
-        
+        # Check if there is MD analysis
+        if not __MDANALYSIS__:
+            raise NotImplementedError("We need MDAnalysis to run the self-diffusion calculations")
         # If there are no selected atoms we compute the MSD and D for all the atomic types
         print("\n\n========MSD ANALYSIS========")
         
@@ -1336,8 +1361,17 @@ class AtomicSnapshots:
 
         # Prepare the ase atoms to be read
         ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = True, pbc = False)
-        index_ini = int(t_ini * 1e+3/self.dt)
-        ase.io.write(ase_atoms_file, ase_atoms[index_ini:])
+        if t_range is None:
+            index_ini = int(self.snapshots //2)
+            index_fin = int(self.snapshots)
+            # Get the range of times in PICOSECONDS
+            t_range = np.asarray([index_ini, index_fin]) * self.dt * 1e-3
+        else:
+            # Sort
+            t_range = np.sort(t_range)
+            index_ini = int(t_range[0] * 1e+3/self.dt)
+            index_fin = int(t_range[1] * 1e+3/self.dt)
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin])
 
         # A dictionary with atom types and the corresponding diffusion constant and error
         D_results = {}
@@ -1368,7 +1402,7 @@ class AtomicSnapshots:
             MD_atoms_selected = MD_atoms.select_atoms('name {}'.format(atomic_type))
             # Prepare the MSD analysis
             MSD_tool = MDAnalysis.analysis.msd.EinsteinMSD(MD_atoms_selected, select = 'all', msd_type = 'xyz',  fft = True)
-            print("\nGetting the Mean Square Displacement for {}".format(atomic_type))
+            print("\nGetting the Mean Square Displacement for {} from {:.2f} to {:.2f} ps".format(atomic_type, t_range[0], t_range[1]))
             # Run the calculation
             MSD_tool.run()
             print("The number of atoms is {} and the number of frames {}".format(MSD_tool.n_particles, MSD_tool.n_frames))
