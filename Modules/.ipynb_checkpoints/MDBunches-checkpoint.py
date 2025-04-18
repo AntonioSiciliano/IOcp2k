@@ -45,8 +45,9 @@ class AtomicBunches:
         # int 0=False 1=True
         self.restart = False
         self.restart_file = None
-        # self.restart_from_nvt = Fas
+        
         self.local_path = None
+        
         ###########
         # CLUSTER #
         ###########
@@ -70,11 +71,11 @@ class AtomicBunches:
                               'no_requeue' : True,
                               # The qos
                               'qos' : 'normal',
-                               # The execution time in SECONDS or in other formats depending on the cluster
+                               # The execution time in SECONDS or in HH:MM:SS depending on the cluster
                               'time' : 10,
                                # The account
                               'account' : 'gen2309',
-                                # set the -x op MSUB
+                              # set the -x op MSUB
                               'minus_x' : True, 
                               # The module load part before running the calculation
                               'module_load' : """
@@ -104,12 +105,14 @@ module load cp2k/2024.3\n
                           "_full_RES_FILE_" : None,
                           # Where to find the basis set
                           "_BASIS_POT_PATH_" :  "/ccc/work/cont003/gen2309/sicilana/DATA_CP2K",
-                          # VDW INTERACTION
-                          "_VDW_" : 1,
+                          # VDW INTERACTION, VDW FUNCTIONAL and WHICH ATOM TO EXCLUDE FROM VDW
+                          "_VDW_" : 1, "_VWD3_FUNCTIONAL_" : None, "_VWD3_EXCLUDE_ATOM_" : None,
                           # THE SMOOTHING OF THE DENSITY
                           "_USE_SMOOTH_" : 1, "_XC_SMOOTH_RHO_" : "NN50", "_XC_DERIV_" :  "NN50_SMOOTH",
                           # CUTOFF in RYDBERG AND NUMBER OF GRIDS
                           "_CUTOFF_" : 600, "_REL_CTOFF_" : 60, "_NGRIDS_" : 4, 
+                          # The functional
+                          "_CP2K_XC_FUNCTIONAL_" : None,
                           # GPAW
                           "_USE_GPAW_" : 1,
                           # OT PARAMETERS
@@ -121,7 +124,7 @@ module load cp2k/2024.3\n
                            "_COORD_FILE_FORMAT_" : "xyz", "_COORD_FILE_NAME_" : "structure.xyz",
                           # KINDS ATOMS AND BASIS SET
                            "_KINDS_BASIS_SET_" : None,
-                          # MD STEPS dt in FEMPTOSECONDS
+                          # MD TIMESTEPS dt in FEMPTOSECONDS and NUMBER OF STEPS
                           "_TIMESTEP_" : 0.5, "_STEPS_" : 1,
                           # THERMOSTAT T in KELVIN and TIMECONSTANT IN FEMPTOSECOND
                           "_TEMPERATURE_" : None, "_TIMECONCSVR_" : None,
@@ -131,7 +134,7 @@ module load cp2k/2024.3\n
                           "_USE_BERRY_" : 0,
                           # COMPUTE HOMO LUMO GAPS EVERY STEPS
                           "_N_HL_GAL_PRINT_" : 200}
-        
+
 
         # tHIS IS SET TO TRUE AFTER CALLING initialize
         self.initialized = False
@@ -151,10 +154,16 @@ module load cp2k/2024.3\n
         """
         INITALIZE ALL THE QUANTITIES NEEDED FOR THE CALCULATIONS
         ========================================================
+
+        Parameters:
+        ----------
+            -where_dict_cluster: the path to the json file with the dictionary used to create the submission file
+            -where_dict_cp2k: the path to the json file with  the cp2k dictionary
         """
         # Load the dictionaries for the cluster and the cp2k calculations
         cluster_dict = load_dict_from_json(where_dict_cluster)
-        
+
+        # Load the dictionaries for the cluster and the cp2k calculations
         cp2k_dict    = load_dict_from_json(where_dict_cp2k)
 
         # Check for compatibility
@@ -169,6 +178,7 @@ module load cp2k/2024.3\n
             if not(key in cp2k_dict):
                 raise ValueError('The cp2k dictionary has {} missing'.format(key))
 
+        # Check consistency between the keys
         for key in self.cluster_dict.keys():
             if not(key in cluster_dict):
                 raise ValueError('The cluster dictionary has {} missing'.format(key))
@@ -185,8 +195,7 @@ module load cp2k/2024.3\n
             raise ValueError("In NVT considering the smoothing procedure")
 
         if not ".xyz" in self.structure_file:
-            raise ValueError("Please use a xyz file structure in Angstrom")
-
+            raise ValueError("Please use a xyz file structure in ANGSTROM")
 
         self.initialized = True
 
@@ -194,233 +203,8 @@ module load cp2k/2024.3\n
 
 
 
-    def create_inp_cp2k_nvt(self, dictionary):
-        """
-        CREATE THE INPUT FOR ENERGY FORCE CALCULATIONS in CP2K
-        """
-        
-        input_text = """@SET RESTART        _RESTART_
 
-@SET BASIS_POT_PATH _BASIS_POT_PATH_
-@SET SYSTEM         _SYSTEM_
-@SET VDW            _VDW_
-@SET USE_SMOOTH     _USE_SMOOTH_
-@SET USE_GPAW       _USE_GPAW_
-@SET PRINT_P_BERRY  _USE_BERRY_
-@SET PRINT_HL_GAP   _N_HL_GAL_PRINT_
-        
-&GLOBAL
-  PROJECT     ${SYSTEM}
-  RUN_TYPE    MD
-  PRINT_LEVEL LOW
-  FLUSH_SHOULD_FLUSH 
-&END GLOBAL
-
-&FORCE_EVAL
-
-  METHOD QuickStep
-
-  &DFT
-    BASIS_SET_FILE_NAME ${BASIS_POT_PATH}/GTH_BASIS_SETS
-    POTENTIAL_FILE_NAME ${BASIS_POT_PATH}/GTH_POTENTIALS
-    &MGRID
-      CUTOFF [Ry]       _CUTOFF_
-      NGRIDS            _NGRIDS_
-      REL_CUTOFF [Ry]   _REL_CTOFF_
-    &END MGRID
-
-    &QS
-      EPS_DEFAULT 1.0E-14    # def=1.0E-10
-      EXTRAPOLATION ASPC     # Extrapolation strategy for the wavefunction during MD
-      #EXTRAPOLATION_ORDER 3 # Default is 3
-      @IF ${USE_GPAW}
-          METHOD GAPW          # Gaussian Augumented Plane Waves
-          QUADRATURE   GC_LOG  # Algorithm to construct the atomic radial grid for GAPW
-          EPSFIT       1.E-6   # Precision to give the extension of a hard gaussian
-          EPSISO       1.0E-12 # Precision to determine an isolated projector
-          EPSRHO0      1.E-8   # Precision to determine the range of V(rho0-rho0soft)
-          # LMAXN0       4
-          # LMAXN1       6
-          # ALPHA0_H     10 # Exponent for hard compensation charge
-      @ENDIF
-    &END QS
-
-    &SCF
-      EPS_SCF 1.0E-7 # def=1.0E-5 the exponent should be half of EPS_DEFAULT
-      MAX_SCF 50     # def=50
-      &OUTER_SCF
-        EPS_SCF 1.0E-7 # def=1.0E-5
-        MAX_SCF 50     # def=50
-      &END OUTER_SCF
-      &OT
-        PRECONDITIONER _OT_PRECONDITIONER_ # Example FULL_SINGLE_INVERSE, FULL_KINETIC
-        MINIMIZER _OT_MINIMIZER_           # Example DIIS
-      &END OT
-    &END SCF
-
-    &XC
-
-      &XC_FUNCTIONAL PBE
-          &PBE
-                PARAMETRIZATION REVPBE
-          &END PBE
-      &END XC_FUNCTIONAL
-      
-      @IF ${USE_SMOOTH}
-      &XC_GRID
-         XC_SMOOTH_RHO  _XC_SMOOTH_RHO_
-         XC_DERIV       _XC_DERIV_
-      &END XC_GRID
-      @ENDIF
-        
-      @IF ${VDW}
-      &vdW_POTENTIAL
-        DISPERSION_FUNCTIONAL PAIR_POTENTIAL
-        &PAIR_POTENTIAL
-          TYPE DFTD3
-          CALCULATE_C9_TERM .TRUE. # Include the 3-body term
-          REFERENCE_C9_TERM .TRUE. #
-          # KIND_COORDINATION_NUMBERS   1 2
-          #LONG_RANGE_CORRECTION .TRUE.
-          PARAMETER_FILE_NAME ${BASIS_POT_PATH}/dftd3.dat
-          VERBOSE_OUTPUT .TRUE.
-          REFERENCE_FUNCTIONAL PBE
-          R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
-          # EPS_CN 1.0E-6 #def=1e-6
-          D3_EXCLUDE_KIND 3 # Exclude the Na atom
-        &END PAIR_POTENTIAL
-      &END vdW_POTENTIAL
-      @ENDIF
-
-    &END XC
-
-    &PRINT
-        &MO_CUBES
-            &EACH
-              MD  ${PRINT_HL_GAP}
-            &END EACH
-            NHOMO        2
-            NLUMO       10
-            WRITE_CUBE   FALSE
-        &END MO_CUBES
-
-        @IF ${PRINT_P_BERRY}
-        &MOMENTS ON
-            COMMON_ITERATION_LEVELS 20000
-            FILENAME =${SYSTEM}-1.dipoles
-            ADD_LAST NUMERIC
-            REFERENCE COM
-            &EACH
-              MD 1
-            &END EACH
-        &END MOMENTS
-        @ENDIF
-        
-    &END PRINT
-
-  &END DFT
-
-  &SUBSYS
-
-    &CELL
-      ABC [angstrom]     _A_ _B_ _C_
-    &END CELL
-
-    &TOPOLOGY
-      CONNECTIVITY OFF
-      COORD_FILE_FORMAT _COORD_FILE_FORMAT_
-      COORD_FILE_NAME   ./_COORD_FILE_NAME_
-    &END TOPOLOGY
-
-    _KINDS_BASIS_SET_
-
-  &END SUBSYS
-
-&END FORCE_EVAL
-
-&MOTION
-  &MD
-    ENSEMBLE      _CALCTYPE_
-    STEPS             _STEPS_
-    TIMESTEP [fs]     _TIMESTEP_
-    TEMPERATURE [K]   _TEMPERATURE_
-    &THERMOSTAT
-      TYPE CSVR
-      &CSVR
-        TIMECON [fs]  _TIMECONCSVR_
-      &END CSVR
-    &END THERMOSTAT
-  &END MD
-
-  # COMVEL_TOL 1.0E-12 # Not good if we need to compute conductivity
-
-  &PRINT
-    &TRAJECTORY  SILENT
-      FILENAME =${SYSTEM}-1.xyz
-      &EACH
-        MD 1
-      &END EACH
-    &END TRAJECTORY
-
-    &FORCES  SILENT
-      FILENAME =${SYSTEM}-1.force
-      &EACH
-        MD 1
-      &END EACH
-    &END FORCES
-
-    &VELOCITIES SILENT
-    	FILENAME =${SYSTEM}-1.vel
-        &EACH
-            MD 1
-        &END EACH
-    &END VELOCITIES
-    
-    &RESTART
-      FILENAME =${SYSTEM}-1.restart
-      &EACH
-        MD 1
-      &END EACH
-    &END RESTART
-    
-    &RESTART_HISTORY SILENT
-      &EACH
-        MD 50
-      &END EACH
-    &END RESTART_HISTORY
-  &END PRINT
-
-&END MOTION
-
-@if ${RESTART}
-&EXT_RESTART
-  RESTART_FILE_NAME _RES_FILE_
-  RESTART_COUNTERS    T
-  RESTART_AVERAGES    T
-  RESTART_POS         T
-  RESTART_VEL         T
-  RESTART_THERMOSTAT  T
-&END EXT_RESTART
-@endif
-            """
-
-        def is_all_upper(s):
-            return s.isupper() and len(s) > 0
-
-        for key, value in dictionary.items():
-            # if is_all_upper(key):
-            print(f"{key} => {value}")
-            pre_input_text = copy.deepcopy(input_text)
-            input_text = input_text.replace(key, "{}".format(value))
-            if input_text == pre_input_text and not(key in ["_full_RES_FILE_", "_PRESSURE_", "_TIMECONCONPRESS_"]):
-                raise ValueError("KEY {} NOT FOUND, please check the text of the cp2k calculation".format(key))
-        
-        file = open("input.inp", "w")
-        file.write(input_text)
-        file.close()
-
-
-    def create_inp_cp2k_npt(self, dictionary):
+    def create_inp_cp2k(self, dictionary):
         """
         CREATE THE INPUT FOR NPT SIMULATIONS in CP2K
         """
@@ -487,11 +271,7 @@ module load cp2k/2024.3\n
 
     &XC
 
-      &XC_FUNCTIONAL PBE
-          &PBE
-                PARAMETRIZATION REVPBE
-          &END PBE
-      &END XC_FUNCTIONAL
+      _CP2K_XC_FUNCTIONAL_
       
       @IF ${USE_SMOOTH}
       &XC_GRID
@@ -506,15 +286,12 @@ module load cp2k/2024.3\n
         &PAIR_POTENTIAL
           TYPE DFTD3
           CALCULATE_C9_TERM .TRUE. # Include the 3-body term
-          REFERENCE_C9_TERM .TRUE. #
-          # KIND_COORDINATION_NUMBERS   1 2
-          #LONG_RANGE_CORRECTION .TRUE.
+          REFERENCE_C9_TERM .TRUE. 
           PARAMETER_FILE_NAME ${BASIS_POT_PATH}/dftd3.dat
           VERBOSE_OUTPUT .TRUE.
-          REFERENCE_FUNCTIONAL PBE
-          R_CUTOFF [angstrom] 12.0 #def=10 angstrom 
-          # EPS_CN 1.0E-6 #def=1e-6
-          D3_EXCLUDE_KIND 3 # Exclude the Na atom
+          REFERENCE_FUNCTIONAL _VWD3_FUNCTIONAL_
+          R_CUTOFF [angstrom] 12.0 # def=10 angstrom 
+          D3_EXCLUDE_KIND _VWD3_EXCLUDE_ATOM_ # Exclude the Na atom type 3
         &END PAIR_POTENTIAL
       &END vdW_POTENTIAL
       @ENDIF
@@ -583,8 +360,6 @@ module load cp2k/2024.3\n
     &END BAROSTAT
   &END MD
 
-  # COMVEL_TOL 1.0E-12 # Not good if we need to compute conductivity
-
   &PRINT
     &TRAJECTORY  SILENT
       FILENAME =${SYSTEM}-1.xyz
@@ -652,12 +427,14 @@ module load cp2k/2024.3\n
 
         def is_all_upper(s):
             return s.isupper() and len(s) > 0
-
+        print("\nCREATING INPUT")
         for key, value in dictionary.items():
             # if is_all_upper(key):
             print(f"{key} => {value}")
             pre_input_text = copy.deepcopy(input_text)
             input_text = input_text.replace(key, "{}".format(value))
+            # print(input_text == pre_input_text)
+            # print(input_text)
             if input_text == pre_input_text and not(key in ["_full_RES_FILE_"]):
                 raise ValueError("KEY {} NOT FOUND, please check the text of the cp2k calculation".format(key))
 
@@ -803,11 +580,11 @@ module load cp2k/2024.3\n
 
             # Create the cp2k input
             if   self.cp2k_dict["_CALCTYPE_"] == "NVT":
-                self.create_inp_cp2k_nvt(self.cp2k_dict)
+                self.create_inp_cp2k(self.cp2k_dict)
             elif self.cp2k_dict["_CALCTYPE_"] == "NPT_I":
-                self.create_inp_cp2k_npt(self.cp2k_dict)
+                self.create_inp_cp2k(self.cp2k_dict)
             else:
-                raise NotImplementedError("NPT is not yey implemented")
+                raise NotImplementedError("NPT_I and NVT are the only implemented")
         
 
             # Save the dictionary with all the input data

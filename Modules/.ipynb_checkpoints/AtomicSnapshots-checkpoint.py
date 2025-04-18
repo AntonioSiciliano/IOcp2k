@@ -1631,6 +1631,8 @@ def save_dict_to_json(json_file_name, my_dict):
     SAVE A DICTIONARY TO JSON FILE
     ==============================
     """
+    is os.path.exists(json_file_name):
+        raise ValueError("The file {} already exists".format(json_file_name))
 
     # Save dictionary to a JSON file
     with open(json_file_name, "w") as file:
