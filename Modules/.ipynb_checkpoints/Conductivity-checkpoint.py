@@ -2,6 +2,8 @@ import os, sys
 
 import numpy as np
 
+import scipy, scipy.integrate
+
 import ase, ase.io
 from ase import Atoms
 
@@ -77,6 +79,9 @@ class Conductivity:
         #int the number of snapshots
         self.N = None
 
+        # The time in PS and the integrated conductivity in Si/m
+        self.results = {}
+
         # The time correlations, i.e. <j(t) j(0)>
         self.correlations = None
 
@@ -138,6 +143,7 @@ class Conductivity:
         self.correlations = np.zeros(self.N, dtype = type(dt))
 
         self.error_correlations = np.zeros(self.N, dtype = type(dt))
+
 
         # Get all the currents in ANGSTROM/PICOSECONDS
         self.js = np.zeros((self.N, 3), dtype = type(self.dt))
@@ -275,7 +281,7 @@ class Conductivity:
         # Range on all the snapshots to get the currents
         for i in range(self.N):
             self.js[i,:]    = self.get_current_from_ase_atoms(i, debug = debug)
-            self.volumes[i] = self.ase_atoms[i].get_volume()
+            self.volumes[i] = self.atoms[i].get_volume()
 
         if use_julia and __JULIA__:
             # Get the julia windowed average (BRUTE FORCE)
@@ -397,7 +403,7 @@ class Conductivity:
 
 
 
-    def plot_correlation_function(self, omega_min_max = [0, 5000], smearing = None, pad = False, save_data = False):
+    def plot_correlation_function(self, omega_min_max = [0, 5000], smearing = None, pad = False, save_data = False, name_json_file = "sigma.json"):
         """
         PLOT THE CURRENT CURRENT CORRELATION FUNCTION
         =============================================
@@ -406,7 +412,14 @@ class Conductivity:
 
         Secondly we plot the time integral of the current current correlation function to get the conductivity
 
-        # TODO add the conductivity calculation as a comulative integral
+        Parameters:
+        -----------
+            -omega_min_max: list of float, the min and max frequency used to plot the FFT of the current-current correlation function
+            -smaering: float, the smearing to use when performing the FFT of the current-current correlation function 
+            -pad: bool, if True we pad the time series to get the FFT (used in self.set_correlations)
+            -save_data: bool, if True we save the evolution of the conductivity in a json file
+            -name_json_file: the name of the json file with the time evolution of conductivity 
+        
         """
         if np.all(self.correlations == 0):
             self.set_correlations()
@@ -442,45 +455,62 @@ class Conductivity:
         plt.tight_layout()
         plt.show()
 
+        ###################
+        # MAKE A 2nd PLOT #
+        ###################
         
         fig = plt.figure(figsize=(10, 5))
         gs = gridspec.GridSpec(1, 2, figure = fig)
         ax = fig.add_subplot(gs[0,0])
-        # PICOSCOND and ANGSTROM^2
+        # PICOSCOND and ANGSTROM^2/PISCOSECON^2
         ax.errorbar(self.t, self.correlations, yerr = self.error_correlations, lw = 3, color = "k")
         ax.set_xlabel('Time [ps]', size = 15)
         ax.set_ylabel('$C_{JJ}(t)$ [Angstrom$^2$/ps$^2$]', size = 15)
         ax.tick_params(axis = 'both', labelsize = 12)
 
-        t_integrations = np.arange(0, self.t[-1], 0.5)[1:]
-        all_sigma = np.zeros(len(t_integrations), dtype = type(self.dt))
-        for it, tmax in enumerate(t_integrations):
-            ax.axvline(tmax)
-            mask_integration = self.t < tmax
-            conv = self.get_factor(mask_integration)
-            sigma = np.sum(self.correlations[mask_integration]) * self.dt * conv
-            all_sigma[it] = sigma
-            print("\nCONV = {}".format(conv))
-            print("INTEGRAL up to t {:.1f} ps | {:.4f}    Si/m".format(tmax, sigma))
-        print()
+        # t_integrations = np.arange(0, self.t[-1], 0.5)[1:]
+        # all_sigma = np.zeros(len(t_integrations), dtype = type(self.dt))
+        # for it, tmax in enumerate(t_integrations):
+        #     # ax.axvline(tmax)
+        #     mask_integration = self.t < tmax
+        #     conv = self.get_factor(mask_integration)
+        #     sigma = np.sum(self.correlations[mask_integration]) * self.dt * conv
+        #     all_sigma[it] = sigma
+        #     print("\nCONV = {}".format(conv))
+        #     print("INTEGRAL up to t {:.1f} ps | {:.4f}    Si/m".format(tmax, sigma))
+        # print()
+
+        # Get the cumulative averages
+        # In ANGSTROM3
+        V_average = np.cumsum(self.volumes)      /np.arange(1, self.N + 1)
+        # In KELVIN
+        T_average = np.cumsum(self.temperatures) /np.arange(1, self.N + 1)
+        # Get the cumulative integral of the current current correlations in ANGSTROM^2/PISCOSECON
+        all_sigma = scipy.integrate.cumulative_trapezoid(self.correlations, x = self.t, dx = self.dt,  initial = 0)
+        ########### FACTOR to GET THE CONDUCTIVITY IN Si/m ###########
+        # Convert in Si/m
+        all_sigma *= (1e+3 * _e_charge_) /(V_average * 3 * T_average * KELVIN_TO_EV)
+        ###############################################################
         
         gs = gridspec.GridSpec(1, 2, figure = fig)
         ax = fig.add_subplot(gs[0,1])
         # PICOSCOND and Si/m
-        ax.plot(t_integrations, all_sigma, 'd', lw = 3)
+        ax.plot(self.t, all_sigma, color = "red", lw = 3)
         
         ax.set_xlabel('Time [ps]', size = 15)
-        ax.set_ylabel('$\\sigma$ [Si/m]', size = 15)
+        ax.set_ylabel('$\\sigma(t)$ [Si/m]', size = 15)
         ax.tick_params(axis = 'both', labelsize = 12)
         plt.tight_layout()
         plt.show()
 
         if save_data:
-            data = {"x" : list(omega), "y" : list(sigma), "delta" : smearing}
-            AtomicSnapshots.save_dict_to_json(data_file, data)
+            data = {"time" : list(self.t), "sigma_t" : list(all_sigma), "delta" : smearing}
+            AtomicSnapshots.save_dict_to_json(name_json_file, data)
+
+        self.results = data
 
 
-    def get_factor(self, mask):
+    def get_factor(self, mask = None):
         """
         GET THE PREFACTOR TO COMPUTE THE CONDUCTIVITY IN SI UNITS
         =========================================================
@@ -491,10 +521,16 @@ class Conductivity:
 
         ..math:  \sigma(\omega) = \frac{1}{3 V k T} \int dt \left\langle j(t) j(0) \right\rangle
         """
-        # Get volume average ANGSTROM3
-        V_av = np.average(self.volumes[mask])
-        # Get temperature average KELVIN
-        T_av = np.average(self.temperatures[mask])
+        if not(mask is None):
+            # Get volume average ANGSTROM3
+            V_av = np.average(self.volumes[mask])
+            # Get temperature average KELVIN
+            T_av = np.average(self.temperatures[mask])
+        else:
+            # Get volume average ANGSTROM3
+            V_av = np.average(self.volumes[:])
+            # Get temperature average KELVIN
+            T_av = np.average(self.temperatures[:])
         ########### FACTOR to GET THE CONDUCTIVITY IN Si/m ###########
         factor =  (1e+3 * _e_charge_) /(V_av * 3 * T_av * KELVIN_TO_EV)
         ###############################################################

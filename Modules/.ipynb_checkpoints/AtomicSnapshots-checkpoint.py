@@ -7,8 +7,10 @@ import ase.neighborlist
 import ase.calculators.singlepoint
 import ase.data
 
+import psutil
+
 import copy
-import os, sys
+import os, sys, gzip
 
 import subprocess
 import json
@@ -81,6 +83,8 @@ ANG_FEMPTOSEC_TO_HA = 0.04571028907825843
 DEBEYE_TO_eANG = 0.20819433622621247
 DEBEYE_TO_AU = DEBEYE_TO_eANG * ANGSTROM_TO_BOHR
 
+matplotlib.use('tkagg')
+
 class AtomicSnapshots:
     """
     GET ATOMIC SNAPSHOTS OF CP2K 
@@ -106,6 +110,8 @@ class AtomicSnapshots:
 
         Time step in FEMPTOSECOND
 
+        It works only for CUBIC BOX!
+
         Parameters
         ----------
             -**kwargs : any other attribute of the ensemble
@@ -129,12 +135,18 @@ class AtomicSnapshots:
         self.unit_cell = np.eye(3) * 10
         # The unit cell NPT
         self.unit_cells = None
-        # Potential and kientic energy
+        # Potential and kientic energy HARTREE
         self.kinetic_energies = None
         self.potential_energies = None
         self.temperatures = None
+        # Pressures and density
+        # HARTREE/BOHR3
+        self.pressures = None 
+        # g/cm3
+        self.densities = None 
+        # HARTREE
         self.cons_quant = None
-        self.velocities = None
+        self.velocities = None # BOHR/AU_TIME
         # Dipole moments with berry phase in ATOMIC UNITS so BOHR
         self.dipoles = None
         self.dipoles_quantum = None
@@ -143,6 +155,9 @@ class AtomicSnapshots:
         self.dt = -1
         # The type of the calculation
         self.calc_type = None
+
+        # The ASE atom object
+        self.ase_atoms_obj = None
         
         
         # Setup the attribute control
@@ -153,7 +168,326 @@ class AtomicSnapshots:
         # Setup any other keyword given in input (raising the error if not already defined)
         for key in kwargs:
             self.__setattr__(key, kwargs[key])
+
+
+
+
+
+    def init_from_lammps(self, file_dump_lammps, file_log_lammps = None, dt = 0.5, atomic_types = ["A", "B"],
+                         create_ase_atoms = False, wrap_ase_pos = False, max_snapshots = None,
+                         type_def = np.float32,
+                         calc_type = "NPT", verbose = True, debug = False):
+        """
+        INIT FROM CUSTOM LAMMPS FILE
+        ============================
+
+        Build to read the file from Lammps (using METAL units) ouputed by a line of code like
+
+        dump      2 all custom 1 output.dump id type xu yu zu vx vy vz fx fy fz
+
+        All the attributes of the class have atomic units
+
+        Parameters:
+        -----------
+            -file_dump_lammps: str, the name of the file to read. Use a gz file.
+            -file_log_lammps: path to a LAMMPS log file
+            -dt: float, the time step between the snapshots
+            -atomic_types: list, the atomic species included in the simulation
+            -create_ase_atoms: float, if True we create also the ase atoms object
+            -max_snapshots: int, the maximum number of snapshots that we want to read.
+            -calc_type: str, the type of clalculation NPT, NVT
+            -verbose: bool
+            -debug: bool
+            
+        """
+        if not max_snapshots is None:
+            # The maximum number of snapshots
+            max_snapshots = int(max_snapshots)
         
+        # Create a dictionary
+        atomic_types = sorted(atomic_types)
+        types_to_atoms = {}
+        for i, item in enumerate(atomic_types):
+            types_to_atoms.update({int(i+1) : item})
+
+        if verbose:
+            print('\n====> LAMMPS SNAPSHOTS <====')
+            print("Reading custom LAMMPS trjectory from {} and {}".format(file_log_lammps, file_dump_lammps))
+            print("The atoms are {}\n".format(types_to_atoms))
+            
+        # Initialize everything
+
+        # The time step in FEMPTOSECONDS
+        self.dt = dt
+        # Positions ANGSTROM 
+        self.positions = [] # np.zeros((self.snapshots, self.N_atoms, 3))
+        # Atomic types
+        self.types = []
+        # Forces HARTREE/BOHR
+        self.forces = [] # np.zeros((self.snapshots, self.N_atoms, 3))
+        # Unit cells ANGSTROM  each row has a unit cell vector
+        self.unit_cells = [] # np.zeros((self.snapshots, 3, 3))
+        # Velocities BOHR/AU TIME
+        self.velocities = [] # np.zeros((self.snapshots, self.N_atoms, 3))
+       
+        # Conserved quantity in HARTREE
+        self.cons_quant = [] # np.zeros(self.snapshots)
+        # Energies HARTREE
+        self.energies = [] # np.zeros(self.snapshots)
+        # Kinetic and potential energy in HARTREE
+        self.kinetic_energies   = [] #np.zeros(self.snapshots)
+        self.potential_energies = [] #np.zeros(self.snapshots)
+        # Pressure in HA/BOHR3
+        self.pressures = []
+        # Density in g/cm3
+        self.densities = []
+        # Stresses HARTREE/BOHR3
+        self.stresses = [] # np.zeros((self.snapshots, 3, 3))
+        # Temperature in KELVIN
+        self.temperatures = [] # np.zeros(self.snapshots)
+
+        # Dipoles are in ATOMIC UNITS units
+        self.dipoles    = np.zeros((self.snapshots, 3), dtype = type_def)
+        self.dipoles_quantum    = np.zeros((self.snapshots, 3, 3), dtype = type_def)
+        # Dipole orgin in ANGSTROM
+        self.dipoles_origin = np.zeros((self.snapshots, 3), dtype = type_def)
+
+        # The calculation executed
+        self.calc_type = calc_type
+
+
+        
+        ###################   
+        # READ LOG LAMMPS #
+        ###################
+        if verbose:
+            print("=========== Read log LAMMPS file (energies, pressures, temperatures)... ===========")
+            print("The file is {}".format(file_log_lammps))
+             
+        if not file_log_lammps is None:
+            file = open(file_log_lammps, 'r')
+            lines = file.readlines()
+
+            # Read the log file of lammps
+            start_collecting = False
+            for index, line in enumerate(lines):
+    
+                if line.startswith('   Step'):
+                    start_collecting = True
+                    
+                #print(line,start_collecting)
+                if start_collecting:
+                    try:
+                        if type(float(line.split()[0])) is float:
+                            # Get all the qunatities in METAL units Kelvin, eV, bar, g/cm3
+                            self.kinetic_energies.append(type_def(line.split()[3]))
+                            self.potential_energies.append(type_def(line.split()[4]))
+                            self.temperatures.append(type_def(line.split()[5]))
+                            self.pressures.append(type_def(line.split()[6]))
+                            self.densities.append(type_def(line.split()[8]))
+                    except:
+                        pass
+
+        self.snapshots = len(self.temperatures)
+        # If the number of snapshots is greater than what expexcted 
+        if not max_snapshots is None:
+            if self.snapshots >  max_snapshots:
+                if verbose:
+                    print("The snapshots found are {} = {:.1f} ps".format(self.snapshots, self.snapshots * dt * 1e-3))
+                    print("reducing to {} snaphots = {:.1f} ps\n".format(max_snapshots, max_snapshots * dt * 1e-3))
+                self.snapshots = max_snapshots
+        else:
+            if verbose:
+                print("The snapshots found are {} = {:.1f} ps\n".format(self.snapshots, self.snapshots * dt * 1e-3))
+        
+        self.kinetic_energies   = np.asarray(self.kinetic_energies[:self.snapshots]) * HA_TO_EV**-1
+        self.potential_energies = np.asarray(self.potential_energies[:self.snapshots]) * HA_TO_EV**-1
+        self.energies           = self.kinetic_energies + self.potential_energies
+        self.temperatures       = np.asarray(self.temperatures[:self.snapshots]) 
+        self.pressures          = np.asarray(self.pressures[:self.snapshots]) * BAR_TO_HA_BOHR3
+        self.densities          = np.asarray(self.densities[:self.snapshots])
+        self.cons_quant = np.zeros(self.snapshots, dtype = type_def)
+
+        if verbose:
+            print("=========== End read log LAMMPS file... ===========\n")
+
+        #######################   
+        # END READ LOG LAMMPS #
+        #######################
+
+        
+        # All the ase atoms objects
+        all_atoms_objects = []
+    
+        # Snapshot id       
+        id_snap = 0
+        # The numner of atoms
+        Nat = 0
+        # The cell and the corresponding shift
+        cell_d = 0.
+        shift = 0.
+
+        # Get the max number of snapshots to read
+        max_snapshots = int(max_snapshots)
+
+        
+        #######################################   
+        # READPOSITIONS  VELOCTIES AND FORCES #
+        #######################################
+
+        if verbose:
+            print("=========== Reading custom LAMMPS file (positions, velocities, forces) in metal units... ===========")
+            print("The file is {}".format(file_dump_lammps))
+            print("Are we creating the ase atoms? {}".format(create_ase_atoms))
+            print("Wrapping ase atoms positions? {}".format(wrap_ase_pos))
+            print()
+            
+        # To spare some meory read line by line
+        with gzip.open(file_dump_lammps, 'rt') as f:
+        
+            for index, line in enumerate(f):
+
+                # Get the step id
+                if line.startswith('ITEM: TIMESTEP'):
+                    # id_snap = int(next(f).split()[0])
+                    id_snap += 1
+
+                # Get the number of atoms
+                if line.startswith('ITEM: NUMBER OF ATOMS'):
+                    Nat = int(next(f).split()[0])
+
+                # Get the box bounds and shape
+                if line.startswith('ITEM: BOX BOUNDS pp pp pp'):
+                    # Get the cell in ANGSTROM
+                    #    ITEM: BOX BOUNDS xx yy zz
+                    #    xlo xhi
+                    #    ylo yhi
+                    #    zlo zhi
+                    shift  = type_def(next(f).split()[0]) 
+                    cell_d = type_def(next(f).split()[1]) - shift
+
+                if line.startswith('ITEM: ATOMS id type xu yu zu vx vy vz fx fy fz'):
+                    # Get all the other atomic properties
+                    arrays = np.zeros((Nat, 2 + 3 + 3 + 3), dtype = type_def)
+                    # NB remember that the coordinates are unwrapped
+                    for at in range(Nat):
+                        # Each line has : id type xu yu zu vx vy vz fx fy fz
+                        arrays[at,:] = np.asarray(next(f).split())
+
+                    # Set the cell Angstrom
+                    cell = np.eye(3, dtype = type_def) * cell_d
+                    
+                    # Print with the same order used in the ouptufile of LAMMPS
+                    if debug and id_snap%1000 == 0:
+                        print("\nSTEP {} of LAMMPS".format(id_snap))
+                        print("IDs")
+                        print(arrays[0, 0])
+                        print("POSITIONS [ANG]")
+                        print(arrays[0, 2:5])
+                        print("VELOCITIES [ANG/PS]")
+                        print(arrays[0, 5:8])
+                        print("FORCES [eV/ANG]")
+                        print(arrays[0, 8:11])
+                        print("CELL [ANG]")
+                        print(cell)
+                        print()
+
+                    if verbose and id_snap%1000 == 0:
+                        # Get virtual memory details
+                        mem = psutil.virtual_memory()
+                        print("Processing LAMMPS snapshot {} with {} atoms. RAM avail {:.2f}".format(id_snap, Nat, mem.available/1024**3))
+
+                    
+                    # Order according to the ids (they are not ordered in general)
+                    arrays = arrays[arrays[:, 0].argsort()]
+                    
+                    # The ids of the atoms from LAMMPS 
+                    ids = arrays[:,0]
+                    # Get the atomic types as a list
+                    types = [types_to_atoms[item] for item in arrays[:,1]]
+                    # Get positions, velocities and forces
+                    positions   = arrays[:, 2:5] - shift   # Angstrom
+                    velocities  = arrays[:, 5:8]           # Angstrom/ps
+                    forces      = arrays[:, 8:11]          # eV/Angstrom
+    
+                    # Get everyhting in AU units for the class
+                    self.positions.append(positions * ANGSTROM_TO_BOHR)
+                    self.velocities.append(velocities * ANGSTROM_TO_BOHR /AU_TIME_TO_PICOSEC**-1)
+                    self.forces.append(forces * HA_TO_EV**-1 /ANGSTROM_TO_BOHR)
+                    self.unit_cells.append(cell * ANGSTROM_TO_BOHR)
+                    if id_snap > 1:
+                        if types != self.types:
+                            raise ValueError("The types have changed {}".format(types))
+                    self.types = types
+    
+
+                    if create_ase_atoms:
+                        # Create the ase atoms uisng eV, Angstrom and ps
+                        structure = ase.atoms.Atoms(types, positions, cell = cell, pbc = [True, True, True])
+                        structure.set_cell(cell)
+                        structure.pbc = True
+                        structure.set_velocities(velocities)
+                        if wrap_ase_pos:
+                            structure.wrap()
+                        # Now set the calculator so that we have energies and forces
+                        calculator = ase.calculators.singlepoint.SinglePointCalculator(structure,
+                                                                                       energy = self.energies[id_snap-1] * HA_TO_EV, # watch out for the -1 convention
+                                                                                       forces = forces,
+                                                                                       stress = np.zeros(6))
+                        # Attach the calculator
+                        structure.calc = calculator
+                        
+                        # Store all the ase atoms objects
+                        all_atoms_objects.append(structure)
+
+                # The id_snap starts from zero
+                if id_snap > max_snapshots:
+                    print("Max number of snaphsots {} reached".format(max_snapshots))
+                    break
+
+        if verbose:            
+            print("=========== End reading custom LAMMPS file... ===========\n")
+
+        
+        # if len(self.kinetic_energies) != len(self.forces[:,0,0]):
+        #     raise ValueError("The length does not coincide")
+            
+        # Store the ase atoms object
+        if create_ase_atoms:
+            if verbose:
+                print("Creating the ase atoms object")
+            self.ase_atoms_obj = all_atoms_objects
+        else:
+            self.ase_atoms_obj = None
+            
+        # Get the number of snapshots
+        self.snapshots = len(self.energies)
+        # Get the number of atoms
+        self.N_atoms = Nat
+        
+        # Positions ANGSTROM 
+        self.positions  = np.asarray(self.positions).reshape((self.snapshots, self.N_atoms, 3))
+        # Forces HARTREE/BOHR
+        self.forces     = np.asarray(self.forces).reshape((self.snapshots, self.N_atoms, 3)) 
+        # Unit cells ANGSTROM  each row has a unit cell vector
+        self.unit_cells = np.asarray(self.unit_cells).reshape((self.snapshots, 3, 3))
+        # Velocities BOHR/AU TIME
+        self.velocities =  np.asarray(self.velocities).reshape((self.snapshots, self.N_atoms, 3)) 
+        # Init the stresses HA/BOHR3
+        self.stresses   = np.zeros((self.snapshots, 3, 3))
+
+        # Check consistency
+        if self.kinetic_energies.shape != self.forces[:,0,0].shape:
+            raise ValueError("The shape of the datas does not match")
+            
+
+        if verbose:
+            print("Finalizing...")
+            print("The snapshots are {}".format(self.snapshots))
+            print("Total time is {} ps".format(self.snapshots * dt * 1e-3))
+            print("The number of atoms is {}".format(Nat))
+            
+        return 
         
 
     def init(self, file_name_head, unit_cell, debug = False, verbose = True, calc_type = 'GEO_OPT',
@@ -161,7 +495,8 @@ class AtomicSnapshots:
                    ext_stress = None, ext_vel = None,
                    ext_ener = None, ext_cell = None, ext_dipoles = None):
         """
-        READ XYZ FILE AS CREATED BY CP2K
+        READ FILES AS CREATED BY CP2K
+        =============================
 
         Positions-Unit cells are in ANGSTROM
 
@@ -171,7 +506,7 @@ class AtomicSnapshots:
         
         Stresses are in HARTREE/BOHR^3
         
-        Velocities are in BOHR/AU TIME
+        Velocities are in BOHR/AU-TIME
         
         Paramters:
         ----------
@@ -237,6 +572,9 @@ class AtomicSnapshots:
         self.stresses = np.zeros((self.snapshots, 3, 3))
         # Velocities BOHR/AU TIME
         self.velocities = np.zeros((self.snapshots, self.N_atoms, 3))
+        # Pressures and densities are NONE
+        self.pressures = None #np.zeros(self.snapshots)
+        self.densities = None #np.zeros(self.snapshots)
         
         # Kinetic and potential energy in HARTREE
         self.kinetic_energies   = np.zeros(self.snapshots)
@@ -256,6 +594,7 @@ class AtomicSnapshots:
             # The index where the atomic positions start
             file_index = isnap * (self.N_atoms + 2) + 2
             
+            # This is the potential energy
             self.energies[isnap] = float(lines[file_index - 1].split()[-1])
             for iatom in range(self.N_atoms):
                 coords = np.asarray(lines[file_index + iatom].split()[1:])
@@ -415,8 +754,8 @@ class AtomicSnapshots:
             lines = file_dipoles.readlines()
 
             for isnap in range(self.snapshots):
-                index = (isnap + 1) * 10 + 9
-
+                index = (isnap + 0) * 10 + 9
+                # print(isnap, lines[index].split())
                 # DEBYE TO ATOMIC UNITS
                 self.dipoles[isnap, :] = np.array([float(lines[index].split()[1]),
                                                    float(lines[index].split()[3]),
@@ -475,7 +814,6 @@ class AtomicSnapshots:
 
 
 
-            
 
 
     def create_ase_snapshots(self, wrap_positions, subtract_com, pbc = True):
@@ -516,7 +854,7 @@ class AtomicSnapshots:
         # ev and angstrom, ev/angstrom3, angstrom/picosecond
         for isnap in range(self.snapshots):
 
-            energy     = self.energies[isnap] * HA_TO_EV
+            energy     = self.potential_energies[isnap] * HA_TO_EV
             forces     = self.forces[isnap,:,:] * HA_BOHR_TO_EV_ANGSTROM
             stress     = -transform_voigt(self.stresses[isnap,:,:]) * HA_BOHR3_TO_EV_ANGSTROM3
             velocities = self.velocities[isnap,:,:] * BOHR_TO_ANGSTROM /AU_TIME_TO_PICOSEC
@@ -527,11 +865,16 @@ class AtomicSnapshots:
                 positions = np.copy(self.positions[isnap,:,:])
 
             if wrap_positions:
-                positions = ase.geometry.wrap_positions(positions[:,:], self.unit_cells[isnap,:,:], pbc = True)
+                positions = ase.geometry.wrap_positions(positions[:,:], self.unit_cells[isnap,:,:], pbc = pbc)
             
             
             # Create the ase atoms object
-            structure = Atoms(self.types, positions)
+            if np.linalg.det(self.unit_cells[isnap,:,:]) <= 1e-6: 
+                raise ValueError("No cell found")
+                
+            structure = Atoms(self.types, positions,
+                              cell = self.unit_cells[isnap,:,:],
+                              pbc = [True, True, True])
             structure.set_cell(self.unit_cells[isnap,:,:])
             structure.pbc[:] = pbc
             # Set the velocties
@@ -550,6 +893,7 @@ class AtomicSnapshots:
     def copy_snapshots(self):
         """
         RETURN A COPY OF THE CURRENT CLASS
+        ===================================
         """
         snapcopy = AtomicSnapshots()
 
@@ -569,7 +913,8 @@ class AtomicSnapshots:
 
     def merge_multiple_snapshots(self, list_of_snapshots):
         """
-        MERGE MULTIPLE SNAPSHOTS 
+        MERGE MULTIPLE SNAPSHOTS
+        ========================
 
         Parameters:
         -----------
@@ -665,7 +1010,7 @@ class AtomicSnapshots:
             -uc: a np.array with the cell BOHR
             -img_name: imag name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
 
         energies = self.energies * HA_TO_EV /self.N_atoms
         forces = np.einsum('iab, iab -> i', self.forces * HA_BOHR_TO_EV_ANGSTROM, self.forces * HA_BOHR_TO_EV_ANGSTROM) /self.N_atoms
@@ -706,23 +1051,25 @@ class AtomicSnapshots:
         The average temperature is 
 
         .. math:: T_{av} = \frac{1}{N} \sum_{n=1}^{N} T_{n}
+
+        and for the error we use the standard error of scipy.stats.sem
         
         Paramters:
         ----------
             -average_window: a list of two numbers, so we will average self.temperatures[average_window[0]:average_window[1]]
             -img_name: imag name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
         # Width and height
         fig = plt.figure(figsize=(7, 4))
         gs = gridspec.GridSpec(1,1, figure=fig)
 
+        # In femptosceond
         x = np.arange(self.snapshots) * self.dt
 
+        # Get the average and the standard error
         T_av = np.average(self.temperatures[average_window[0]: average_window[1]])
-        # Get the standard error
-        N_samples = len(self.temperatures[average_window[0]: average_window[1]])
-        T_err = np.sqrt(np.sum((self.temperatures[average_window[0]: average_window[1]] - T_av)**2))/N_samples
+        T_err = scipy.stats.sem(self.temperatures[average_window[0]: average_window[1]])
         
         ax = fig.add_subplot(gs[0,0])
         xmin, xmax = np.sort(x[average_window])
@@ -755,7 +1102,7 @@ class AtomicSnapshots:
             -average_window: a list of two numbers, so we will average self.temperatures[average_window[0]:average_window[1]]
             -img_name: imag name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
         # Width and height
         fig = plt.figure(figsize=(7, 4))
         gs = gridspec.GridSpec(1,1, figure=fig)
@@ -765,10 +1112,9 @@ class AtomicSnapshots:
         # The pressure is the trace of the stress tensor
         pressures = np.einsum("iaa -> i", self.stresses) * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA /3 
 
-        # Get the average with the standard error
-        N_samples = len(pressures[average_window[0]: average_window[1]])
+        # Get the average with the standard error GPa
         P_av  = np.average(pressures[average_window[0]: average_window[1]])
-        P_err = np.sqrt(np.sum((pressures[average_window[0]: average_window[1]] - P_av)**2))/N_samples
+        P_err = scipy.stats.sem(pressures[average_window[0]: average_window[1]])
         
         ax = fig.add_subplot(gs[0,0])
         xmin, xmax = np.sort(x[average_window])
@@ -798,7 +1144,7 @@ class AtomicSnapshots:
             -average_window: a list of two numbers, so we will average self.unit_cell[average_window[0]:average_window[1],:,:]
             -img_name: imag name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
         # Width and height
         fig = plt.figure(figsize=(10, 5))
         gs = gridspec.GridSpec(1,2, figure=fig)
@@ -815,9 +1161,10 @@ class AtomicSnapshots:
         volumes = np.zeros(self.snapshots, dtype = float)
         for i in range(self.snapshots):
             volumes[i] = np.linalg.det(self.unit_cells[i,:,:]) 
+            
         # Get the average and the standard error in ANGSTROM^3
-        V_average = np.sum(volumes[average_window[0]: average_window[1]]) /N_samples
-        V_err = np.sqrt(np.sum((volumes[average_window[0]: average_window[1]] - V_average)**2)) /N_samples
+        V_average = np.average(volumes[average_window[0]: average_window[1]])
+        V_err = scipy.stats.sem(volumes[average_window[0]: average_window[1]])
 
         for i in range(2):
                 ax = fig.add_subplot(gs[0,i])
@@ -859,7 +1206,7 @@ class AtomicSnapshots:
             -average_window: a list of two int numbers, so we will average self.unit_cell[average_window[0]:average_window[1],:,:]
             -img_name: image name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
         # Width and height
         fig = plt.figure(figsize=(7, 4))
         gs = gridspec.GridSpec(1,1, figure=fig)
@@ -867,30 +1214,28 @@ class AtomicSnapshots:
         # Time steps in FEMPTOSECOND
         x = np.arange(self.snapshots) * self.dt
 
-        # Get the total molar mass in UMA 
-        total_mass = np.sum(self.get_masses_from_types())
-
-        # Get the volumes in ANGSTROM^3
-        volumes = np.zeros(self.snapshots, dtype = float)
-        for i in range(self.snapshots):
-            volumes[i] = np.linalg.det(self.unit_cells[i,:,:]) 
+        if self.densities is None:
+            # Get the total molar mass in UMA 
+            total_mass = np.sum(self.get_masses_from_types())
+    
+            # Get the volumes in ANGSTROM^3
+            volumes = np.zeros(self.snapshots, dtype = float)
+            for i in range(self.snapshots):
+                volumes[i] = np.linalg.det(self.unit_cells[i,:,:]) 
             
-        # Get the average and error of the volume in the time window in ANGSTROM^3
-        N_samples = len(volumes[average_window[0]: average_window[1]])
-        V_average = np.sum(volumes[average_window[0]: average_window[1]]) /N_samples
-        V_err = np.sqrt(np.sum((volumes[average_window[0]: average_window[1]] - V_average)**2)) /N_samples
-        
-        # Get the density from UMA/ANG3 in g/cm^3
-        # rho = total_mass  /(0.602214076 * volumes)
-        rho = total_mass * 1.660538 /volumes
+            # Get the density from UMA/ANG3 in g/cm^3
+            # rho = total_mass  /(0.602214076 * volumes)
+            rho = total_mass * 1.660538 /volumes
+        else:
+            rho = self.densities
 
         if save_rho_json:
             # Save the results to a json file
             times_rho = {"t" : list(x), "rho" : list(rho)}
             save_dict_to_json(json_file_result, times_rho)
         
-        rho_av  = np.sum(rho[average_window[0]: average_window[1]]) /N_samples
-        rho_err = np.sqrt(np.sum((rho[average_window[0]: average_window[1]] - rho_av)**2))/N_samples
+        rho_av  = np.average(rho[average_window[0]: average_window[1]]) 
+        rho_err = np.std(rho[average_window[0]: average_window[1]])
 
         # Plot everything
         ax = fig.add_subplot(gs[0,0])
@@ -1002,7 +1347,7 @@ class AtomicSnapshots:
         ----------
             -img_name: imag name if you want to save
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
 
         energies = self.energies * HA_TO_EV /self.N_atoms
         forces = np.einsum('iab, iab -> i', self.forces * HA_BOHR_TO_EV_ANGSTROM, self.forces * HA_BOHR_TO_EV_ANGSTROM) /self.N_atoms
@@ -1059,7 +1404,10 @@ class AtomicSnapshots:
 
 
         ax = fig.add_subplot(gs[3,:])
-        pressure = np.einsum("iaa -> i", self.stresses) * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA /3
+        if self.pressures is None:
+            pressure = np.einsum("iaa -> i", self.stresses) * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA /3
+        else:
+            pressure = self.pressures * BAR_TO_HA_BOHR3**-1 * BAR_TO_GPA
         ax.plot(x, pressure,  color = 'green', lw = 3)
         ax.set_xlabel('Time [fs]', size = 15)
         ax.set_ylabel('P [GPa]', size = 12)
@@ -1186,7 +1534,8 @@ class AtomicSnapshots:
         return
 
 
-    def get_pair_correlation_functions(self, selected_atoms, t_range = None, my_r_range = (0.01, 6.0), bins = 500,
+    def get_pair_correlation_functions(self, selected_atoms, custom_ase_atoms = None,
+                                       t_range = None, my_r_range = (0.01, 6.0), bins = 500,
                                        ase_atoms_file = "atoms_gr.xyz", save_ase_atoms_file = False, wrap_positions = True, use_pbc = True,
                                        json_file_result = "pair_corr_function.json" , show_results = True, save_plot = False):
         """
@@ -1199,8 +1548,12 @@ class AtomicSnapshots:
         Parameters:
         -----------
             -selected_atoms: list, list of atomic types for which we compute the pair correlation function
+
+            -custom_ase_atoms: ase atoms object
+            -dt: the time step in FEMPTOSECOND
             
-            -t_range: list of float, the time window  in PIDCOSECOND. In this widow compute the averages.
+            -t_range: list of float, the time window in PICOSECOND. In this widow compute the averages. 
+                      If not specified we consider just the last half of the trajectory
             
             -my_r_range: tuple, the minimum and maximum value for r in ANGSTROM
             -bins: int, the number of r values
@@ -1220,7 +1573,7 @@ class AtomicSnapshots:
         --------
             -g_results: a dictionary containing as items the atomic pair types with r and g(r)
         """
-        matplotlib.use('tkagg')
+        # matplotlib.use('tkagg')
         # Check if there is MD analysis
         if not __MDANALYSIS__:
             raise NotImplementedError("We need MDAnalysis to run the pair correlation function calculations")
@@ -1236,7 +1589,12 @@ class AtomicSnapshots:
         #     my_r_range = (0.0, 6.0)
 
         # Prepare the ase atoms to be read
-        ase_atoms = self.create_ase_snapshots(wrap_positions = wrap_positions, subtract_com = False, pbc = use_pbc)
+        if custom_ase_atoms is None:
+            print("Create the ase atoms")
+            ase_atoms = self.create_ase_snapshots(wrap_positions = wrap_positions, subtract_com = False, pbc = use_pbc)
+        else:
+            print("We already have a custom ase atoms")
+            ase_atoms = custom_ase_atoms
         
         if t_range is None:
             index_ini = int(self.snapshots //2)
@@ -1247,8 +1605,13 @@ class AtomicSnapshots:
             t_range = np.sort(t_range)
             index_ini = int(t_range[0] * 1e+3/self.dt)
             index_fin = int(t_range[1] * 1e+3/self.dt)
-        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin])
 
+        # Temporary wrtie the ase atoms objects
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin], format = "xyz")
+        # Get the correct indices (usefule to set the corret shape of the box in MDanalysis)
+        my_indices = np.arange(index_ini, index_fin, dtype = int)
+
+        
         # A dictionary with atom types and the corresponding diffusion constant and error
         g_results = {}
         # Read the xyz file
@@ -1266,9 +1629,11 @@ class AtomicSnapshots:
         print("Setting the cell dimension and the time step (this might take a while)...")
         for snapshot, MD_atoms_snapshot in enumerate(MD_atoms.trajectory):
             # Manually set the unit cell dimensions in ANGSTROM
-            MD_atoms_snapshot.dimensions = [self.unit_cells[snapshot,0,0], self.unit_cells[snapshot,1,1], self.unit_cells[snapshot,2,2], 90.0, 90.0, 90.0]  
+            ind_sn = my_indices[snapshot]
+            MD_atoms_snapshot.dimensions = [self.unit_cells[ind_sn,0,0], self.unit_cells[ind_sn,1,1], self.unit_cells[ind_sn,2,2], 90.0, 90.0, 90.0] 
+            # MD_atoms_snapshot.dimensions = [ase_atoms[snapshot].cell[0,0], ase_atoms[snapshot].cell[1,1], ase_atoms[snapshot].cell[2,2], 90.0, 90.0, 90.0] 
             # Apply the time step to all frames in PICOSECONDS
-            MD_atoms_snapshot.dt = self.dt* 1e-3
+            MD_atoms_snapshot.dt = self.dt * 1e-3
 
         for index, atomic_pair in enumerate(selected_atoms):
             print('\nRDF for {} {} from {:.1f} to {:.1f} ps'.format(atomic_pair[0], atomic_pair[1], t_range[0], t_range[1]))
@@ -1312,8 +1677,11 @@ class AtomicSnapshots:
         return g_results
 
 
+        
+
+
     def get_diffusion_constant(self, t_range = None, time_windows = None, subtract_com = True, selected_atoms = None,
-                               ase_atoms_file = "atoms_msd.xyz", save_ase_atoms_file = False,
+                               ase_atoms_file   = "atoms_msd.xyz", save_ase_atoms_file = False,
                                json_file_result = "self_diffusion.json" , show_results = True, save_plot = False):
         """
         GET THE SELF-DIFFUSION CONSTANT FROM THE FIT OF THE MEAN SQUARE DISPLACEMENT
@@ -1343,6 +1711,7 @@ class AtomicSnapshots:
         Returns:
         --------
             -D_results: a dictionary containing as items the atomic types with diffusion constants and its error
+            -MSD_results: a dictionary containing as items the atomic types with lagtimes and meas square displacement
         """
         matplotlib.use('tkagg')
         # Check if there is MD analysis
@@ -1371,10 +1740,15 @@ class AtomicSnapshots:
             t_range = np.sort(t_range)
             index_ini = int(t_range[0] * 1e+3/self.dt)
             index_fin = int(t_range[1] * 1e+3/self.dt)
-        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin])
+        ase.io.write(ase_atoms_file, ase_atoms[index_ini:index_fin], format = "extxyz")
+
+        # Get the correct indices 
+        my_indices = np.arange(index_ini, index_fin, dtype = int)
 
         # A dictionary with atom types and the corresponding diffusion constant and error
         D_results = {}
+        # A dictionary with atom types and the corresponding diffusion constant and error
+        MSD_results = {}
         # Read the xyz file
         MD_atoms = MDAnalysis.Universe(ase_atoms_file)
         
@@ -1390,7 +1764,9 @@ class AtomicSnapshots:
         print("Setting the cell dimension and the time step...")
         for snapshot, MD_atoms_snapshot in enumerate(MD_atoms.trajectory):
             # Manually set the unit cell dimensions in ANGSTROM
-            MD_atoms_snapshot.dimensions = [self.unit_cells[snapshot,0,0], self.unit_cells[snapshot,1,1], self.unit_cells[snapshot,2,2], 90.0, 90.0, 90.0]  
+            # Get the correct id of the snapshot
+            ind_snap = my_indices[snapshot]
+            MD_atoms_snapshot.dimensions = [self.unit_cells[ind_snap,0,0], self.unit_cells[ind_snap,1,1], self.unit_cells[ind_snap,2,2], 90.0, 90.0, 90.0]
             # Apply the time step to all frames in PICOSECONDS
             MD_atoms_snapshot.dt = self.dt* 1e-3
             # if snapshot % 100 == 0:
@@ -1424,13 +1800,16 @@ class AtomicSnapshots:
             
             linear_model = scipy.stats.linregress(lagtimes[mask], my_msd[mask])
             slope, slope_error = linear_model.slope, linear_model.stderr
-            # dim_fac is 3 as we computed a 3D msd with 'xyz', ANGSTROM/PICOSECOND
+            # dim_fac is 3 as we computed a 3D msd with 'xyz', ANGSTROM2/PICOSECOND
             D, D_error = slope * 1/(2 * MSD_tool.dim_fac), slope_error * 1/(2 * MSD_tool.dim_fac)
             # Now in METER^2/SECOND
             D *= 1e-8
             D_error *= 1e-8
 
+            # Now in METER^2/SECOND
             D_results.update({atomic_type : [D, D_error]})
+            # Now in PICOSECOND, ANGSTROM^2
+            MSD_results.update({atomic_type : [list(lagtimes), list(my_msd)]})
             print("=>Diffusion constant for atom {}".format(atomic_type))
             print("==>D {:.3e} +- {:.3e} ".format(D, D_error) + "m$^2$/s")
             # plt.plot(lagtimes, res)
@@ -1454,18 +1833,21 @@ class AtomicSnapshots:
 
         # Save the results to a json file
         save_dict_to_json(json_file_result, D_results)
+        save_dict_to_json("raw_" + json_file_result, MSD_results)
+        
         # Remove the ase atoms object
         if not save_ase_atoms_file:
             subprocess.run("rm {}".format(ase_atoms_file), shell = True)
 
-        return D_results
+        return D_results, MSD_results
 
 
-    def get_conductivity(self, types_q = {"Na" : +1, "Cl" : -1}, 
+    def get_conductivity(self, types_q = {"Na" : +1, "Cl" : -1}, custom_ase_atoms = None,
                          time_window = None,
                          use_julia = False, python_normalize = True,
-                         pad = True, omega_ir = [0, 5000], smearing = None, save_jj = False,
-                         test = True,
+                         pad = True, omega_ir = [0, 5000], smearing = None,
+                         save_sigma = False, name_sigma_file = "sigma.json",
+                         test = True, show_results = True,
                          ase_atoms_file = 'ase_cond.xyz'):
         """
         GET THE CONDUCTIVITY
@@ -1491,10 +1873,12 @@ class AtomicSnapshots:
             -use_julia: bool, if True the dipole dipole correlation fucntion is computed using the Windowed average in JULIA
             -python_normalize: bool, if True the FFT is normalized so it coicides with the windowed average of Julia
 
-            -pad: bool
+            -pad: bool, if True we pad the sigmal before doing FFT
             -omega_ir: list, the range to plot in cm-1
             -smearing: float the smaering in cm-1 for plotting the IR spectra
-            -save_ir: bool, if True we save the IR spectra as a json file
+            
+            -save_sigma: bool, if True we save the conductivity evolution as a json file
+            -name_sigma_file: str, the name of the json file with the integrated copn
 
             -test: bool: if True we compare the julia and python correlation functions
         """
@@ -1508,11 +1892,20 @@ class AtomicSnapshots:
             # Convert in FEMPTOSCEON ONLY TO GET THE INDICES
             index1 = int(t_min * 1e+3/self.dt)
             index2 = int(t_max * 1e+3/self.dt)
+            if index2 > self.snapshots:
+                index2 = self.snapshots
 
         print("\n\n================= CONDUCTIVITY ANALYSIS from {:.2f} to {:.2f} ps =================".format(t_min, t_max))
             
         # Prepare the ase atoms to be read
-        ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = False, pbc = False)
+        # ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = False, pbc = False)
+        # Prepare the ase atoms to be read
+        if custom_ase_atoms is None:
+            print("Create the ase atoms")
+            ase_atoms = self.create_ase_snapshots(wrap_positions = False, subtract_com = False, pbc = False)
+        else:
+            print("We already have a custom ase atoms")
+            ase_atoms = custom_ase_atoms
 
         # Set up the class
         cond = Conductivity.Conductivity()
@@ -1525,19 +1918,15 @@ class AtomicSnapshots:
         # Set the time correlations
         cond.set_correlations(use_julia = use_julia, python_normalize = python_normalize)
 
-        # x1, res1 = cond.get_spectra(cond.correlations, delta = None, pad = False)
-
-        # x2, res2 = cond.get_spectra(cond.correlations, delta = None, pad = True)
-
-        # plt.plot(x1, res1)
-        # plt.plot(x2, res2)
-        # plt.show()
-
-        # Plot everyhting
-        cond.plot_correlation_function(omega_min_max = omega_ir, smearing = smearing, pad = pad, save_data = save_jj)
+        if show_results:
+            # Plot everyhting
+            cond.plot_correlation_function(omega_min_max = omega_ir, smearing = smearing, pad = pad,
+                                           save_data = save_sigma, name_json_file = name_sigma_file)
 
         if test:
             cond.test_implementation()
+
+        return cond.results
 
         
 
@@ -1548,7 +1937,7 @@ class AtomicSnapshots:
     def get_ir_spectra(self, time_window = None,
                        Nmax = 5, tol_refold = 1.0, debug_refold = False,
                        use_julia = False, python_normalize = False,
-                       omega_ir = [0, 5000], smearing = None, save_ir = False,
+                       omega_ir = [0, 5000], smearing = None, save_ir = False, plot_results = True,
                        test = False):
         """
         GET THE IR SPECTRA FROM DIPOLE-DIPOLE CORRELATION FUNCTION
@@ -1562,8 +1951,8 @@ class AtomicSnapshots:
             -tol_refold: float, the tolerance to consider the dipoles snapshots continuous
             -debug_refold: bool, if True we print the refolding details
             
-            -use_julia: bool, if True the dipole dipole correlation fucntion is computed using the Windowed average in JULIA
-            -python_normalize: bool, if True the FFT is normalized so it coicides with the windowed average of Julia
+            -use_julia: bool, if True the dipole dipole correlation function is computed using the Windowed average in JULIA
+            -python_normalize: bool, if True the FFT is normalized so it coincides with the windowed average of Julia
 
             -omega_ir: list, the range to plot in cm-1
             -smearing: float the smaering in cm-1 for plotting the IR spectra
@@ -1571,6 +1960,7 @@ class AtomicSnapshots:
 
             -test: bool: if True we compare the julia and python correlation functions
         """
+        # For the time we use PICOSECONDS
         if time_window is None:
             index1 = 0
             index2 = self.snapshots + 1
@@ -1578,7 +1968,7 @@ class AtomicSnapshots:
             t_max = self.snapshots * self.dt * 1e-3
         else:
             t_min, t_max = np.sort(np.asarray(time_window))
-            # Convert in FEMPTOSCEON ONLY TO GET THE INDICES
+            # Convert in fs only to get the indices
             index1 = int(t_min * 1e+3/self.dt)
             index2 = int(t_max * 1e+3/self.dt)
 
@@ -1596,9 +1986,10 @@ class AtomicSnapshots:
         
         # Get the dipole-dipole time correlation function
         vibrations.set_dipole_dipole_correlation_function(use_julia = use_julia, python_normalize = python_normalize)
-        
-        # Plot the results
-        vibrations.plot_results(omega_min_max = omega_ir, delta = smearing, save_data = save_ir)
+
+        if plot_results:
+            # Plot the results
+            vibrations.plot_results(omega_min_max = omega_ir, delta = smearing, save_data = save_ir)
 
         if test:
             vibrations.test_implementation()
@@ -1611,6 +2002,12 @@ class AtomicSnapshots:
         =======================================================
 
         If the component i of the dipoles is discontinous we add (or subtract) a multiple integer of the trivial phase
+
+        Parameters:
+        -----------
+            -Nmax: int, we try to refold the dipoles
+            -tol: float, the tolerance need to find discontinuties in the dipole moments. If |P[i] - P[i+1]| > tol we try to make it continous.
+            -debug: bool, to debug and test
         """
         cmps = ["X", "Y", "Z"]
         # Refold the dipoles 
@@ -1631,9 +2028,6 @@ def save_dict_to_json(json_file_name, my_dict):
     SAVE A DICTIONARY TO JSON FILE
     ==============================
     """
-    is os.path.exists(json_file_name):
-        raise ValueError("The file {} already exists".format(json_file_name))
-
     # Save dictionary to a JSON file
     with open(json_file_name, "w") as file:
          # 'indent=4' makes the JSON human-readable
@@ -1708,122 +2102,22 @@ def refold_dipole(P, cell, Nmax = 1, tol = 1.0, debug = True):
                 
 
 
-# def OLDrefold_dipole(P, cell, Nmax = 1, tol = 1.0, debug = True, debug_visualize = False):
-#     """
-#     REFOLD THE DIPOLES USING INTEGER MULTIPLES OF THE BERRY QUANTUM OF POLARIZATION
-#     ===============================================================================
-
-#     1) We identify all the intervals where the dipole is discontinuous
-#     2) For each of these ranges, we try to add the quantum time -Nmax, -(Nmax-1), .., 0, 1, .. +Nmax
-
-#     Note: array[i1:i2] select the indices from i1 to i2-1
-    
-#     Parameters:
-#     -----------
-#         -P:    np.array with shape N, the dipoles along a given axis x, y, z for a trajectory of size N
-#         -cell: np.array with shape N, the Berry quantum along the given axis for a trajectory of size N
-#         -Nmax: int, the integer number we multiply the quantum of polarization to have a continuous function
-#         -tol: float, the tolerance which we use to tell if the dipoles are continuous or not
-#         -debug: bool
-#         -debug_visualize: bool, if True the code outputs some plots
-
-#     Returns:
-#     --------
-#         -Pini: np.array with shape N, the CONTINUOUS dipoles along a given axis x, y, z for a trajectory of size N
-        
-#     """
-#     # The dipoles we manipulate
-#     Pini = np.copy(P)
-#     # Get the size of the trajectory
-#     trajectory_size = len(P)
-
-#     # First check all the differences
-#     #differences = np.zeros(trajectory_size, dtype = float)
-#     differences = np.abs(Pini[:-1] - Pini[1:])
-#     # If they are all smaller than a given treshold we assume no jumps
-#     if np.all(differences < tol):
-#         print("Nothing to do. Everthing is continuous")
-#         return P
-#     else:
-#         # Check where the differences are larger than tol
-#         mask = np.where(differences > tol)[0]
-            
-#         # Reshape the indices and check if len(mask) is an integer multiple of 2
-#         even = True
-#         try:
-#             # The number of discontinuous parts 
-#             N_disc = len(mask)//2
-#             mask = np.asarray(mask).reshape((N_disc, 2))
-#         except:
-#             # Maybe the very last bit is discontinous,
-#             # so we append to the mask the very last index of the trajectory
-#             mask = np.append(mask, trajectory_size - 1)
-#             N_disc = len(mask)//2
-#             mask = np.asarray(mask).reshape((N_disc, 2))
-#             even = False
-
-#         if debug:
-#             print("The inidices where the differences were large")
-#             print(mask)
-#             print("{} discontinous regiond found. The tol is {}. Even {}\n".format(N_disc, tol, even))
-#         for i in range(N_disc):
-#             if debug:
-#                 print("Range {} the min-max indices are {}".format(i, mask[i]))
-#         # We will make continuous each range where the dipoles are discontinuous
-#         continuous = [False] * N_disc
-
-#         for i in range(N_disc):
-#             # Get all the indices from min to max, 
-#             # np.arange create mask[i,0], mask[i,0] + 1, ... mask[i,1] -1
-#             # WITH THE +1 WE CONSIDER FROM mask[i,01 + 1 to mask[i,1] INCLUDED
-#             indices = np.arange(mask[i,0], mask[i,1])  #+ 1
-#             if debug:
-#                 print("\nTrying to fix the interval #{} from {} to {}".format(i, indices[0], indices[-1]))
-#             # Loop over integer numbers
-#             for integer in range(-Nmax, Nmax + 1):
-#                 if debug:
-#                     print("Trying with {}".format(integer))
-#                 # Store the value of the dipoles before the shift
-#                 Pini0 = np.copy(Pini)
-#                 # Now shift the values of the dipoles by the Berry quantum
-#                 Pini[indices] += integer * cell[indices]
-#                 if debug_visualize:
-#                     plt.plot(np.arange(trajectory_size), Pini)
-#                     plt.plot(np.arange(trajectory_size)[indices], Pini[indices], color = "red")
-#                     plt.show()
-#                 # Check again the differences IN THE CURRENT RANGE 
-#                 if not even and i == N_disc - 1:
-#                     if debug:
-#                         print('ANALYZING {} {}'.format(indices[0], indices[-1]))
-#                     differences = np.abs(Pini[:-1] - Pini[1:])[indices[0]-1:indices[-1]]
-#                 else:
-#                     if debug:
-#                         print('ANALYZING {} {}'.format(indices[0], indices[-1]))
-#                     differences = np.abs(Pini[:-1] - Pini[1:])[indices]
-                
-#                 # If it is continuous IN THE CURRENT RANGE then we break the integer loop
-#                 if np.all(differences < tol):
-#                     if debug:
-#                         print("The dipole is continous with {} max diff {:.2e}\n".format(integer,differences.max()))
-#                     continuous[i] = True
-                    
-#                     break
-#                 # Otherwise we restore the initial value of the dipole and we keep going
-#                 else:
-#                     if debug:
-#                         print("The dipole is NOT continous with {} max diff {:.2e}".format(integer, differences.max()))
-#                     # restore the original values
-#                     Pini = np.copy(Pini0)
-#                     # This range i is not continous
-#                     continuous[i] = False
-
-#         if debug:
-#             print("\n\nFINAL RESULTS")
-#             print(continuous)
-#         if not np.all(np.asarray(continuous) == True):
-#             raise ValueError("The dipoles are not continous try to increase Nmax")
-
-#         return Pini
+def print_units():
+    """
+    PRINT THE UNITS USED IN THE CLASS AtomiSnapshots
+    ================================================
+    """
+    print()
+    print("=========== UNITS USED IN THE CODE ===========")
+    print("========== UNITS OF THE ATTRIBUTES ===========")
+    print("POSITIONS in ANGSTROM")
+    print("VELOCITIES in BOHR/AUTIME")
+    print("ENERGIES in HARTREE")
+    print("FORCES in HARTREE/BOHR")
+    print("STRESS in HARTREE/BOHR3")
+    print("DIPOLES in AU")
+    print("")
+    print()
 
 
 def transform_voigt(tensor, voigt_to_mat = False):

@@ -194,6 +194,16 @@ module load cp2k/2024.3\n
         if "NVT" in self.cp2k_dict["_CALCTYPE_"] and not bool(self.cp2k_dict["_USE_SMOOTH_"]):
             raise ValueError("In NVT considering the smoothing procedure")
 
+        # Check that the CP2k functional and the parameterization of the VDW are consistent
+        # Otherwis an erro wil be raised
+        dft_functional_used  = self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split()[1]
+        # Check for a specific parametrization of the XC functional
+        if "PARAMETRIZATION" in self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split():
+            index = self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split().index("PARAMETRIZATION")
+            dft_functional_used = self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split()[index + 1]
+        if self.cp2k_dict["_VWD3_FUNCTIONAL_"] != dft_functional_used:
+            raise ValueError("The DFT xc is {} whereas the D3 parametrization is {}".format(dft_functional_used, self.cp2k_dict["_VWD3_FUNCTIONAL_"]))
+
         if not ".xyz" in self.structure_file:
             raise ValueError("Please use a xyz file structure in ANGSTROM")
 
@@ -609,7 +619,88 @@ module load cp2k/2024.3\n
         subprocess.run(["chmod", "+x", "./retrive.sh"], check=True)    
 
 
+    
+#     def create_run_file_generic(self, batch_index, execution_dir):
+#         """
+#         CREATES THE RUN.SH FILE FOR SLURM SCHEDULER
+#         ===========================================
 
+#         Parameters:
+#         -----------
+#             -batch_index: int used as label for the job name and for submitting the next batch calculation
+#             -execution_dir: the dir containing the run.sh file and all the inputs needed by cp2k
+#         """
+    
+#         avail_partitions = ["QC", "MD"]
+#         # Chek if the partition is ok
+#         if not (self.cluster_dict["partition_name"] in avail_partitions):
+#             raise ValueError("Partition name not valid")
+    
+#         # myQOS = "normal"
+#         # if self.cluster_dict["time"] > 60 * 60 * 24:
+#         #     myQOS = "long"
+    
+#         # Check if the numer of NODES are correct
+#         if self.cluster_dict["partition_name"] == avail_partitions[0]:
+#             if self.cluster_dict["ncpus"] % 32 != 0:
+#                 exp_nodes = 1 + self.cluster_dict["ncpus"] // 32 
+#             else:
+#                 exp_nodes = self.cluster_dict["ncpus"] // 32
+            
+        
+#         if exp_nodes != self.cluster_dict["nnodes"]:
+#             print("GENERIC| The expected number of nodes is {} but you choose {} for ncpus {}", exp_nodes,  self.cluster_dict["nnodes"],  self.cluster_dict["ncpus"])
+#             raise ValueError("GENERIC| The number of nodes is not correct, the job will crash")
+    
+        
+#         file = open("run.sh", "w")
+        
+#         file.write("""
+# #!/bin/bash
+# #SBATCH -J {}_{:d}
+# #SBATCH -p {}   
+# #SBATCH -N {:d}
+# #SBATCH -n {:d}
+# #SBATCH --time={}  # HH:MM:SS
+        
+# {}
+        
+# """.format(self.cluster_dict["job_name"], batch_index,
+#                self.cluster_dict["partition_name"],
+#                self.cluster_dict["nnodes"],
+#                self.cluster_dict["ncpus"], 
+#                self.cluster_dict["time"],
+#                self.cluster_dict["module_load"]))
+        
+        
+#         allfiles = os.listdir("./")
+#         for myfile in allfiles:
+#             if myfile.endswith(".inp"):
+#                 print("GENERIC| You are running {} \n".format(myfile))
+#                 file.write("""
+# cd {}
+# {} {} -i {} -o output.out
+    
+# """.format(os.path.join(self.cluster_dict["cluster_scratch"], execution_dir),
+#                self.cluster_dict["mpirun"],  self.cluster_dict["exe"], myfile))
+    
+#         if batch_index > 0:
+#             final_dir  = execution_dir.replace("BATCH_{}".format(batch_index), "BATCH_{}".format(batch_index + 1))
+#             final_path = os.path.join(self.cluster_dict["cluster_scratch"], final_dir)
+#             file.write("cp ./{}-1.restart {}\n\n".format(self.cp2k_dict["_SYSTEM_"], os.path.join(final_path, self.cp2k_dict["_RES_FILE_"])))
+        
+#             # Go in the next directory and run the new job
+#             file.write("cd {}\n".format(final_path))
+#             # Chagne the restart
+#             file.write("chmod g+s ./*\n")
+#             file.write("{} run.sh\n".format(self.cluster_dict['run_job']))
+        
+        
+#         file.close()
+
+
+
+    
 
     def create_run_file_irene(self, batch_index, execution_dir):
         """
