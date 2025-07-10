@@ -59,7 +59,7 @@ class ClusterAnalysis:
             raise ValueError("Could not find the IOcp2k directory")
 
         # The path to the clustering script (user dependent part)s
-        self.path_to_clustering_script = os.path.join(path, "scripts/find_clusters.py") #"/home/antonio/IOcp2k/scripts/find_clusters.py"
+        self.path_to_clustering_script = os.path.join(path, "scripts/find_clusters_opt.py") #"/home/antonio/IOcp2k/scripts/find_clusters.py"
 
         # The path to the clustering analysis script (user dependent part)s
         self.path_to_analysis_script   = os.path.join(path, "scripts/analyze_cluster.py") # "/home/antonio/IOcp2k/scripts/analyze_cluster.py"
@@ -143,6 +143,7 @@ class ClusterAnalysis:
             -dt: float, the dt of the MD simulation in FEMPTOSECOND
             -debug: bool, if True the python script called will output many informations 
         """
+        # print(
         # Command as a list of strings
         command = [ "python3", self.path_to_analysis_script, "{}".format(self.path_to_result_dir),
                    "{}".format(self.types[0]) , "{}".format(self.types[1]), "{}".format(dt), "{}".format(int(debug))]
