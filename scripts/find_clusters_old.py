@@ -4,14 +4,10 @@ import os, sys, json, pickle
 import mpi4py
 from mpi4py import MPI
 import networkx as nx
-import gc, psutil
-import time
 
-# Hardcoded variable
-EXCLUDED_POS = np.ones(3) * -0.1
-PRINT_EVERY_N = 100
 
-def get_types_idx(atoms, my_types = ["Na", "Cl"], excluded_position = EXCLUDED_POS, debug = False):
+
+def get_types_idx(atoms, my_types = ["Na", "Cl"]):
     """
     GET THE INDICIES OF THE ATOMS FORMING THE CLUSTER
     ==================================================
@@ -26,15 +22,9 @@ def get_types_idx(atoms, my_types = ["Na", "Cl"], excluded_position = EXCLUDED_P
         -sel_types_idx_0, sel_types_idx_1: np.arrays with the indices of the target atoms
     """
     if len(my_types) != 2:
-        raise ValueError("The atomic types must be 2")
-
+        raise ValueError("The atomic types mus be 2")
     # Get all the atomic types, np.array of len N_AT_TOT
     types = np.asarray(atoms.get_chemical_symbols())
-
-    if rank == 0 and debug:
-        if not excluded_position is None:
-            print("We are excluding the atoms in {} [Ang]".format(excluded_position))
-            
 
     # Select only the atomic types I want
     sel_types_0 = types == my_types[0]
@@ -46,38 +36,15 @@ def get_types_idx(atoms, my_types = ["Na", "Cl"], excluded_position = EXCLUDED_P
     # Get the corresponding indices
     sel_types_idx_1 = np.where(sel_types_1)[0]
 
-
-
-    if not excluded_position is None:
-        # Exclude the atoms in a given position (useful to study cavity formation)
-        idx_to_exclude_0 = np.where((atoms.positions[:,:] == excluded_position).all(axis=1))[0]
-        idx_to_exclude_1 = np.where((atoms.positions[:,:] == excluded_position).all(axis=1))[0]
-    
-        if rank == 0 and debug:
-            print("We are excluding the atoms {}".format(my_types[0]))
-            print(idx_to_exclude_0)
-            print("We are excluding the atoms {}".format(my_types[1]))
-            print(idx_to_exclude_1)
-    
-        # Get rid of the other atoms
-        sel_types_idx_0 = [item for item in sel_types_idx_0   if item not in idx_to_exclude_0]
-        sel_types_idx_1 = [item for item in sel_types_idx_1   if item not in idx_to_exclude_1]  
-        # Back to arrays
-        sel_types_idx_0, sel_types_idx_1 = np.asarray(sel_types_idx_0), np.asarray(sel_types_idx_1)
-    
-        if rank == 0 and debug:
-            print("Some atoms have been excluded. These are the ones we will analyze...")
-            print("Atom {} #{} indices {}".format(my_types[0], len(sel_types_idx_0), sel_types_idx_0))
-            print("Atom {} #{} indices {}".format(my_types[1], len(sel_types_idx_1), sel_types_idx_1))
-
-    return np.asarray(sel_types_idx_0, dtype = int), np.asarray(sel_types_idx_1, dtype = int)
+    return sel_types_idx_0, sel_types_idx_1
 
 
 
 def cluster_analysis(atoms, index = 0, 
-                     adjacency = None, 
+                     my_dist = None, adjacency = None, 
                      rc_min = 0.5, rc_max = 1, 
                      types = ["Na", "Cl"], indices_types = None,
+                     excluded_position = np.ones(3) * -0.1,
                      debug = False):
     """
     CLUSTER_ANALYSIS
@@ -95,7 +62,7 @@ def cluster_analysis(atoms, index = 0,
         -atoms: a single ase atoms object, eg an MD snapshots
         -index: int, the id of atoms object
         
-        #-my_dist: np.array with size (Nat, Nat), the matrix of distances among all atoms in the atoms object
+        -my_dist: np.array with size (Nat, Nat), the matrix of distances among all atoms in the atoms object
         -adjacency: np.array of bool with size (Nat_1, Nat_2), where Nat_1 Nat_2 are the number of types[0] and types[1] atoms
         
         -rc_min: float, the minimum distance (Angstrom)
@@ -117,16 +84,50 @@ def cluster_analysis(atoms, index = 0,
         -all_at1_ind: a list of len len_clusters, with the indices of atoms types[1] forming the cluster
         -all_at0_at1_ind: a list of len len_clusters with the indices of all the atoms forming the cluster
     """
+    # Get all the distances
+    if my_dist is None:
+        if rank == 0 and debug:
+            print("Computing the distances")
+        my_dist = atoms.get_all_distances(mic=True)
+    else:
+        if my_dist.shape != (len(atoms), len(atoms)):
+            raise ValueError("The distance matrix should be {}x{}".format(len(atoms), len(atoms)))
+
     # Identify at1 and at2 indices
     sel_types_idx_0, sel_types_idx_1 = indices_types
     if sel_types_idx_0 is None or sel_types_idx_1 is None:
-        raise ValueError("Give me the indices of the atoms for which")
+        if rank == 0 and debug:
+            print("Recomputing the {} {} indices".format(my_types[0], my_types[1]))
+        sel_types_idx_0, sel_types_idx_1 = get_types_idx(atoms, my_types)
 
 
+
+        
     if rank==0 and debug:
+        print("=========================== MASTER | CONF {} ===========================".format(index))
         print("Atom {} #{} indices {}".format(types[0], len(sel_types_idx_0), sel_types_idx_0))
         print("Atom {} #{} indices {}".format(types[1], len(sel_types_idx_1), sel_types_idx_1))
-        
+        if not excluded_position is None:
+            print("We are excluding the atoms in {}".format(excluded_position))
+        print()
+
+    
+    if not excluded_position is None:
+        # exclude the atoms in a given position
+        idx_to_exclude_0 = np.where((atoms.positions[:,:] == excluded_position).all(axis=1))[0]
+        idx_to_exclude_1 = np.where((atoms.positions[:,:] == excluded_position).all(axis=1))[0]
+        if rank == 0 and debug:
+            print("We are excluding the atoms {}".format(types[0]))
+            print(idx_to_exclude_0)
+            print("We are excluding the atoms {}".format(types[1]))
+            print(idx_to_exclude_1)
+            sel_types_idx_0 = [item for item in sel_types_idx_0   if item not in idx_to_exclude_0]
+            sel_types_idx_1 = [item for item in sel_types_idx_1   if item not in idx_to_exclude_1]
+            
+            sel_types_idx_0, sel_types_idx_1 = np.asarray(sel_types_idx_0), np.asarray(sel_types_idx_1)
+            print("Atom {} #{} indices {}".format(types[0], len(sel_types_idx_0), sel_types_idx_0))
+            print("Atom {} #{} indices {}".format(types[1], len(sel_types_idx_1), sel_types_idx_1))
+
     
     # Define a graph and its edges by using the atomic indices
     G = nx.Graph()
@@ -137,7 +138,7 @@ def cluster_analysis(atoms, index = 0,
                 G.add_edge('{}{}'.format(types[0], at0), '{}{}'.format(types[1], at1))
                 if rank==0 and debug:
                     edge = ('{}{}'.format(types[0], at0), '{}{}'.format(types[1], at1))
-                    print("Graph edge {} d {:.4f} Ang".format(edge, atoms.get_distance(at0, at1, mic = True)))
+                    print("Graph edge {} d {:.4f} Ang".format(edge, my_dist[at0,at1]))
     
     # Find clusters (connected components)
     clusters = list(nx.connected_components(G))
@@ -146,6 +147,8 @@ def cluster_analysis(atoms, index = 0,
         print(f"Number of {types[0]}{types[1]} clusters: {len(clusters)}\n")
 
 
+
+        
     # The size of all the cluster
     all_cluster_size = []
     # The compositon of all the cluster
@@ -160,7 +163,7 @@ def cluster_analysis(atoms, index = 0,
         # Get the size of the cluster
         all_cluster_size.append(len(cluster))
 
-        # The number of atoms0 and atoms1 present in the cluster
+        # The number of atoms0 and atoms1 present in the cluste
         at0_count, at1_count = 0, 0
         # The indices of atoms0 and atoms1 composing the cluster
         at0_ind, at1_ind = [], []
@@ -190,7 +193,7 @@ def cluster_analysis(atoms, index = 0,
             else:
                 raise ValueError("The type {} does not match any of the input one {}".format(atoms[ind].symbol, types))
                 
-        # Get the composition of the cluster At1NAt2M with N and M integers
+        # Get the composition of the cluster At1Nt2M with N and M integers
         composition = "{}{}{}{}".format(types[0], at0_count, types[1], at1_count) 
         # Store the compositon
         all_cluster_composition.append(composition)
@@ -206,7 +209,7 @@ def cluster_analysis(atoms, index = 0,
             # Cycle on the atomic indicices of the cluster to check connectivity
             for i in at0_ind:
                 for j in at1_ind:
-                    print("{}[{}] {}[{}] d {:.3f} Ang".format(types[0], i, types[1], j, atoms.get_distance(i, j, mic = True)))
+                    print("{}[{}] {}[{}] d {:.3f} Ang".format(types[0], i, types[1], j, my_dist[i,j]))
             print()
 
         # Put all the indices together
@@ -219,45 +222,16 @@ def cluster_analysis(atoms, index = 0,
         print("The ids of the atoms forming all the cluster")
         print(all_at0_at1_ind)
         print()
+        print("=========================== END CONF ===========================")
+        print()
+        print()
         
     return len(clusters), np.asarray(all_cluster_size), all_cluster_composition, all_at0_ind, all_at1_ind, all_at0_at1_ind
 
 
-def get_mask(atom, ids0, ids1, min_r, max_r, debug = False):
-    """
-    GET THE ADIACENCY MASK
-    ======================
 
-    Parameters:
-    -----------
-        -atom: ase atoms, MD snapshot
-        -ids0: np array of int, the ids of the atomic type 1
-        -ids1: np array of int, the ids of the atomic type 2
-        -min_r: float
-        -max_r: float
-        -debug: bool
-    """
-    # Get the distances between the atoms ids we selected Angstrom
-    d = atom.get_distances(ids0[:, None], ids1[None, :], mic = True)
-    d = d.reshape((len(ids0), len(ids1)))
-
-    mask_d = (d > min_r) & (d < max_r)
-
-    if rank == 0 and debug:
-        print("  -GET ADJACENCY MATRIX-")
-        print("  Type 1 ids", ids0)
-        print("  Type 2 ids", ids1)
-        print("  DIST MAT [ANG]")
-        print(d)
-        print()
-
-    # clean the memory
-    del d
-    gc.collect()
-
-    return mask_d
     
-def look_for_clusters(configs, atoms, min_r = 0.9, max_r = 1.0, my_types = ["Na", "Cl"], verbose = True, debug = False):
+def look_for_clusters(configs, min_r = 0.9, max_r = 1.0, my_types = ["Na", "Cl"], verbose = True, debug = False):
     """
     CHECK DISTANCES
     ===============
@@ -267,7 +241,6 @@ def look_for_clusters(configs, atoms, min_r = 0.9, max_r = 1.0, my_types = ["Na"
     Parameters:
     -----------
         -configs: a list of int, configurations to go through
-        -atoms: a list of ase atoms objects
         -min_r: float, the minimum distance (Angstrom)
         -max_r: float, the maximum distance (Angstrom)
         -my_types: list, the chemical types forming the clusters
@@ -278,120 +251,60 @@ def look_for_clusters(configs, atoms, min_r = 0.9, max_r = 1.0, my_types = ["Na"
     results = []
 
 
-    if len(configs) != len(atoms):
-        raise ValueError("The number of snpshots does not coincide with the list of configurations")
-
     # Check all the atomic configurations
-    for i, atom in enumerate(atoms):
-        # NB the i is not the configuration index
-        # The configuration id is configs[i]
-
-        if rank == 0 and verbose and configs[i] % PRINT_EVERY_N == 0:
-            print("\n\n=========================== MASTER | START CONF {} ===========================".format(configs[i]))
+    for i in configs:
+        # Get all the distances ANGSTROM
+        d =  atoms[i].get_all_distances(mic = True)
 
         # Get the indices of the selected atoms of len N_at_1 and N_at_2
-        # !!!! We also filter out the atoms outside of the box !!!!
-        sel_types_idx_0, sel_types_idx_1 = get_types_idx(atom, my_types = my_types, debug = debug)
-
-        # #### MEMORYY UNEFFICIENT PART ####
-        # # Get all the distances ANGSTROM
-        # d =  atom.get_all_distances(mic = True)
-
-        # # Select only the distances I want, the shape is (N_at_1, N_at_2)
-        # sel_d = (d[sel_types_idx_0,:])[:,sel_types_idx_1]
-
-        # # Clean the memory
-        # del d
-        # gc.collect()
+        sel_types_idx_0, sel_types_idx_1 = get_types_idx(atoms[i], my_types = my_types)
         
-        # # Choose only atoms that are in the range min_r max_r, the shape is (N_at_1, N_at_2)
-        # mask_d = (sel_d > min_r) & (sel_d < max_r)
-        # #### MEMORYY UNEFFICIENT PART ####
+        # Select only the distances I want, the shape is (N_at_1, N_at_2)
+        sel_d = (d[sel_types_idx_0,:])[:,sel_types_idx_1]
 
-        # TEST OF THE NEW CODE
-        # # This avoids to compute all the distances and store them
-        # # Choose only atoms that are in the range min_r max_r, the shape is (N_at_1, N_at_2)
-        # new_mask_d = get_mask(atom, sel_types_idx_0, sel_types_idx_1, min_r, max_r)
-        # print(new_mask_d.astype(int) - mask_d.astype(int))
+        # Choose only atoms that are in the range min_r max_r, the shape is (N_at_1, N_at_2)
+        mask_d = (sel_d > min_r) & (sel_d < max_r)
 
-        # Get the adjaceny mask (memory efficient implementation)
-        mask_d = get_mask(atom, sel_types_idx_0, sel_types_idx_1, min_r, max_r)
-
-        if rank == 0 and verbose and configs[i] % PRINT_EVERY_N == 0:
-            print("\n---------------------------------------")
-            print("  CONF {}".format(configs[i]))
-            print("  NAT TOT {}".format(len(atom)))
-            print("  RAM avail {:.2f} Gb".format(get_ram()))
-            print("  <<<<< Min R {:.2f} Ang Max R {:.2f} Ang >>>>>>".format(min_r, max_r))
+        if rank==0 and verbose and i%100 == 0:
+            print("\n====================================")
+            print("CONF {}".format(i))
+            print("NAT TOT {}".format(len(atoms[i])))
+            print("<<<<< Min R {:.2f} Ang Max R {:.2f} Ang >>>>>>".format(min_r, max_r))
             print()
-            print("  ATOM {}".format(my_types[0]))
-            print("  NAT SEL {}".format(len(sel_types_idx_0)))
-            print("  ID  SEL\n{}".format(sel_types_idx_0))
+            print("ATOM {}".format(my_types[0]))
+            print("NAT SEL {}".format(len(sel_types_idx_0)))
+            print("ID  SEL\n{}".format(sel_types_idx_0))
             print()
-            print("  ATOM {}".format(my_types[1]))
-            print("  NAT SEL {}".format(len(sel_types_idx_1)))
-            print("  ID  SEL\n{}".format(sel_types_idx_1))
+            print("ATOM {}".format(my_types[1]))
+            print("NAT SEL {}".format(len(sel_types_idx_1)))
+            print("ID  SEL\n{}".format(sel_types_idx_1))
             print()
-            # OBSOLETE PART
-            # try:
-            #     print("Min d {:.2f} [Ang]".format(sel_d[sel_d != 0].min()))
-            # except:
-            #     print("miss")
-            print("---------------------------------------\n")
+            print("Min d {:.2f} [Ang]".format(sel_d[sel_d != 0].min()))
+            print("====================================\n")
 
         # Get the number of cluster the size and its composition
-        num_clusters, sizes, compositions, at0_inds, at1_inds, at0_at1_inds = cluster_analysis(atom, index = configs[i],
-                                                                                               adjacency = mask_d,
-                                                                                               rc_min = min_r, rc_max = max_r,
-                                                                                               types = my_types,
-                                                                                               indices_types = [sel_types_idx_0, sel_types_idx_1],
-                                                                                               debug = debug)
+        num_clusters, sizes, compositions, at0_inds, at1_inds, at0_at1_inds = cluster_analysis(atoms[i], index = i,
+                                                                                           my_dist = d, adjacency = mask_d,
+                                                                                           rc_min = min_r, rc_max = max_r,
+                                                                                           types = my_types,
+                                                                                           indices_types = [sel_types_idx_0, sel_types_idx_1],
+                                                                                           debug = debug)
         # Information about the configuration with clusters
-        dictionary = {"conf" : configs[i],         # the current configuration
-        # OBSOLETE PART  #"dist_mat" : None, # sel_d, #  the matrix distances between my_types[0] and my_types[1] # THIS COULD GIVE RAM ISSUES
+        dictionary = {"conf" : i,         # the current configuration
+                      "dist_mat" : sel_d, # the matrix distances between my_types[0] and my_types[1]
                       "id_{}".format(my_types[0]) : at0_inds, # the indices of type0 in the cluster
                       "id_{}".format(my_types[1]) : at1_inds, # the indices of type1 in the cluster
                       "id_{}{}".format(my_types[0], my_types[1]) : at0_at1_inds, # the indices of type0 and type1 in the cluster
-                      "num_clust" : num_clusters,   # the number of clusters
-                      "sizes" : sizes,              # The size of the cluster
+                      "num_clust" : num_clusters,  # the number of clusters
+                      "sizes" : sizes,             # The size of the cluster
                       "composition" : compositions} # The composition
-        
         # Store the dictionary 
         results.append(dictionary)
 
 
-        if rank == 0 and verbose and configs[i] % PRINT_EVERY_N == 0:
-            print("=========================== MASTER | END OF CONF {} ===========================\n\n".format(configs[i]))
-
-
     return results
 
-def get_ram():
-    """
-    GET THE RAM MEMORY Gb
-    =====================
-    """
-    mem = psutil.virtual_memory()
 
-    return mem.available/1e+9
-    
-def print_mem():
-    """
-    PRINT THE MEMORY
-    ================
-    """
-    print("RAM {:.2f}".format(get_ram()))
-
-
-def chunk_list(lst, chunk_size):
-    """
-    DIVIDE THE LIST INTO CHUNKS
-    ===========================
-    """
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
-
-    
-    
 if __name__ == '__main__':
     """
     SCRIPT TO STUDY THE FORMATION OF CLUSTERS
@@ -399,7 +312,7 @@ if __name__ == '__main__':
 
     The usage is
 
-    mpirun -np 2 python3 parallel_clusters.py aseatoms.traj rc_min rc_max debug_bool_as_int types1 types2 path_where_execute
+    mpirun -np 2 python3 parallel_clusters.py aseatoms.xyz rc_min rc_max debug_bool_as_int types1 types2 path_where_execute
     """
     # MPI setup
     comm = MPI.COMM_WORLD
@@ -408,11 +321,11 @@ if __name__ == '__main__':
 
     
     if rank==0 and len(sys.argv[1:]) != 7:
-        raise ValueError("mpirun -np 2 python3 path/find_clusters.py atoms.traj rc_min rc_max debug_bool_as_int type1 type2 path_where_execute")
+        raise ValueError("mpirun -np 2 python3 path/find_clusters.py atoms.xyz rc_min rc_max debug_bool_as_int type1 type2 path_where_execute")
 
     #########################################
     # Requesed inputs
-    # The ase atoms .traj file
+    # The ase atoms
     ase_atoms_dir = sys.argv[1]
 
     # The min distance cutoff in Angstrom
@@ -429,47 +342,32 @@ if __name__ == '__main__':
 
     # The path where we excute the code
     total_path = sys.argv[7]
+    # os.chdir(total_path)
     #########################################
 
+    if rank == 0:
+        print("===============================")
+        print("THIS IS THE FIND CLUSTER SCRIPT")
+        print("===============================\n\n")
 
     
-    if rank == 0:
-        print("\n=========================================")
-        print("THIS IS THE OPTIMIZED FIND CLUSTER SCRIPT")
-        print("=========================================\n\n")
+
+    # Read the ase atoms
+    atoms = ase.io.read(os.path.join(total_path, ase_atoms_dir), index = ":")
+
+    # Get the total number of configurations
+    total_configs = len(atoms)
 
     # Split the configurations among processors
     if rank == 0:
-        print("MASTER| Looking for {} clusters in {} within {:.2f} {:.2f} Ang\n".format(my_types, ase_atoms_dir, RCUT_min, RCUT_max))
-        
-        # Read the ase atoms (only the master does this)
-        atoms = ase.io.Trajectory(os.path.join(total_path, ase_atoms_dir))
-        atoms = list(atoms)
-    
-        # Get the total number of configurations
-        total_configs = len(atoms)
-
-        # Check that we are working with a number of configurations that is an integer multiple of the processors
-        if total_configs % size != 0:
-            raise ValueError("Choose a divisor of {}".format(total_configs))
-
-        # The legth of the snapshots that will be ananlyzed
-        chunk_size = total_configs //size
+        print("MASTER| Looking for {} clusters in {} within {} {} Ang\n".format(my_types, ase_atoms_dir, RCUT_min, RCUT_max))
         # Split the configurations 
-        atoms_chunks   = chunk_list(atoms, chunk_size) 
-        configs_chunks = chunk_list(list(np.arange(total_configs)), chunk_size)
-
-        # Clean the memory
-        del atoms 
-        gc.collect()
+        configs = np.array_split(np.arange(total_configs, dtype = int), size) 
     else:
-        atoms = None
-        atoms_chunks = None
-        configs_chunks = None
+        configs = None
 
     # Scatter the configurations ids that have to be computed to each rank
-    local_atoms   = comm.scatter(atoms_chunks, root = 0)
-    local_configs = comm.scatter(configs_chunks, root = 0)
+    local_configs = comm.scatter(configs, root = 0)
 
     print("RANK {} will compute {} configurations from #{} to #{}".format(rank, len(local_configs),
                                                                           local_configs[0], local_configs[-1]))
@@ -477,7 +375,7 @@ if __name__ == '__main__':
 
     comm.Barrier()
 
-    local_results = look_for_clusters(local_configs, local_atoms, my_types = my_types,
+    local_results = look_for_clusters(local_configs, my_types = my_types,
                                       min_r = RCUT_min, max_r = RCUT_max,
                                       verbose = True, debug = DBG)
 
@@ -512,12 +410,7 @@ if __name__ == '__main__':
             # Ravel the gathered list (useful for saving)
             ravel_results = [item for sublist in results for item in sublist]
             # print(ravel_results[0])
-            print()
-            for item_ind, item in enumerate(ravel_results):
-                print("ITEM {}".format(item_ind))
-                print(item)
-            print()
-            
+
             name_file_pkl = os.path.join(DIR_RES, "CLUSTER_confs_atoms_bonded_rc{:.2f}_{:.2f}_Nc_{}.pkl".format(RCUT_min, RCUT_max, total_configs))
             with open(name_file_pkl, "wb") as file:
                 pickle.dump(ravel_results, file)
