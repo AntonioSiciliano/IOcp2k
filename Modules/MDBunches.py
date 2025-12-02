@@ -605,7 +605,7 @@ module load cp2k/2024.3\n
             
             # Create the .sh file to run all files in one shot
             if batch == self.n_batches + self.n_batches_min - 1:
-                # If this is the lst batch we set batch_index to -1 so at the end it does not copy the restart file for the next job
+                # If this is the last batch we set batch_index to -1 so at the end it does not copy the restart file for the next job
                 custom_cluster_function(-1,    execution_dir)
             else:
                 custom_cluster_function(batch, execution_dir)
@@ -710,7 +710,7 @@ module load cp2k/2024.3\n
 
         Parameters:
         -----------
-            -batch_index: int used as label for the job name and for submitting the next batch calculation
+            -batch_index: int used as label for the job name and for submitting the next batch calculation, -1 if it is the last batch to submit
             -execution_dir: the dir containing the run.sh file and all the inputs needed by cp2k
         """
     
@@ -790,7 +790,8 @@ cd {}
             final_dir  = execution_dir.replace("BATCH_{}".format(batch_index), "BATCH_{}".format(batch_index + 1))
             final_path = os.path.join(self.cluster_dict["cluster_scratch"], final_dir)
             file.write("cp ./{}-1.restart {}\n\n".format(self.cp2k_dict["_SYSTEM_"], os.path.join(final_path, self.cp2k_dict["_RES_FILE_"])))
-        
+
+            # TODO Add a check on the convergence of the SCF caclcualtion
             # Go in the next directory and run the new job
             file.write("cd {}\n".format(final_path))
             # Chagne the restart
