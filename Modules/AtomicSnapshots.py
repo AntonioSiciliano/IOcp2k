@@ -547,9 +547,9 @@ class AtomicSnapshots:
         
 
     def init(self, file_name_head, unit_cell, debug = False, verbose = True, calc_type = 'GEO_OPT',
-                   ext_pos = None, ext_force = None,
+                   ext_pos = None, ext_force = None, 
                    ext_stress = None, ext_vel = None,
-                   ext_ener = None, ext_cell = None, ext_dipoles = None):
+                   ext_ener = None, ext_cell = None, ext_dipoles = None, custom_dt = None):
         """
         READ FILES AS CREATED BY CP2K
         =============================
@@ -567,7 +567,7 @@ class AtomicSnapshots:
         Paramters:
         ----------
             -file_name_head: the path to the extension of the file
-            -unit_cell: np.array with the cell shape in ANGSTROM, lattice vectors are the rows.
+            -unit_cell: np.array 3.3 with the cell shape in ANGSTROM, lattice vectors are the rows.
             -debug: bool,
             -verbose: bool,
             -calc_type: strg, it is needed to understand which calculation was done
@@ -788,13 +788,17 @@ class AtomicSnapshots:
                 self.potential_energies[isnap] = float(lines[isnap + 1].split()[4])
                 self.cons_quant[isnap]         = float(lines[isnap + 1].split()[5])
             if self.calc_type == 'MD':
-                try:
-                    self.dt = float(lines[2].split()[1]) - float(lines[1].split()[1])
-                except:
-                    print("Set anually the time step. The file is too short. Probably only one step was done.")
-                    self.dt = float(input("Please enter the dt: "))
-                print('Update the dt to {} fs'.format(self.dt))
-                self.dt = float(self.dt)
+                if custom_dt is None:
+                    try:
+                        self.dt = float(lines[2].split()[1]) - float(lines[1].split()[1])
+                    except:
+                        print("Set anually the time step. The file is too short. Probably only one step was done.")
+                        self.dt = float(input("Please enter the dt: "))
+                    print('Update the dt to {} fs'.format(self.dt))
+                    self.dt = float(self.dt)
+                else:
+                    print('Custom dt')
+                    self.dt = custom_dt
             # close the file
             file_ener.close()
         ####### END READ THE ENER FILE ########
@@ -1117,6 +1121,7 @@ class AtomicSnapshots:
         if not(img_name is None):
             plt.savefig(img_name, dpi = 500)
         plt.show()
+        plt.close()
         
         return
 
@@ -1166,6 +1171,7 @@ class AtomicSnapshots:
 
         if show:
             plt.show()
+        plt.close()
 
 
     def plot_pressure_evolution(self, average_window = [0,-1], img_name = None, show = True):
@@ -1215,9 +1221,11 @@ class AtomicSnapshots:
             plt.savefig(img_name, dpi = 500)
         if show:
             plt.show()
+        plt.close()
 
 
-    def plot_unit_cell_evolution(self, average_window = [0,-1], img_name = None, show = True):
+    def plot_unit_cell_evolution(self, average_window = [0,-1], img_name = None,
+                                 return_values = False, show = True):
         """
         PLOT ISOTROPIC UNIT CELL and VOLUME EVOLUTION FROM MD
         =====================================================
@@ -1281,6 +1289,10 @@ class AtomicSnapshots:
 
         if show:
             plt.show()
+        plt.close()
+
+        if return_values:
+            return V_average, V_err
 
 
     def plot_density_evolution(self, average_window = [0,-1], img_name = None, save_rho_json = False,
@@ -1345,6 +1357,7 @@ class AtomicSnapshots:
             plt.savefig(img_name, dpi = 500)
         if show:
             plt.show()
+        plt.close()
 
         if return_values:
             return rho_av, rho_err
@@ -1431,6 +1444,7 @@ class AtomicSnapshots:
             plt.savefig(img_name, dpi = 500)
         if show:
             plt.show()
+        plt.close()
         
         return
 
@@ -1527,6 +1541,7 @@ class AtomicSnapshots:
             plt.savefig(img_name, dpi = 500)
         if show:
             plt.show()
+        plt.close()
         
         return
 
@@ -1622,7 +1637,7 @@ class AtomicSnapshots:
         if not(img_name is None):
             plt.savefig(img_name, dpi = 500)
         plt.show()
-
+        plt.close()
 
         # Width and height
         fig = plt.figure(figsize=(5, 5))
@@ -1636,6 +1651,7 @@ class AtomicSnapshots:
         if not(img_name is None):
             plt.savefig('forces_' + img_name , dpi = 500)
         plt.show()
+        plt.close()
         
         return
 
@@ -1776,6 +1792,7 @@ class AtomicSnapshots:
             if save_plot:
                 plt.savefig("gr.png", dpi = 500)
             plt.show()
+        plt.close()
 
         save_dict_to_json(json_file_result, g_results)
         
@@ -1947,6 +1964,7 @@ class AtomicSnapshots:
             plt.savefig("diffusion.png", dpi = 500)
         if show_results:
             plt.show()
+        plt.close()
 
         # Save the results to a json file
         save_dict_to_json(json_file_result, D_results)
@@ -2224,6 +2242,7 @@ def refold_dipole(P, cell, Nmax = 1, tol = 1.0, debug = True):
         plt.plot(Pini, ls = ":", label = "AFTER")
         plt.legend()
         plt.show()
+        plt.close()
 
     return Pini
                 

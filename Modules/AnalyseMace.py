@@ -58,6 +58,16 @@ class AnalyseMace:
         self.dft = None
         self.ml = None
 
+
+        # Setup the attribute control
+        self.__total_attributes__ = [item for item in self.__dict__.keys()]
+        # This must be the last attribute to be setted
+        self.fixed_attributes = True 
+
+        # Setup any other keyword given in input (raising the error if not already defined)
+        for key in kwargs:
+            self.__setattr__(key, kwargs[key])
+
     def initialize(self, select_random = False):
         """
         INITIALIZATION

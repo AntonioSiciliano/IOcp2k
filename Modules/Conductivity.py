@@ -242,7 +242,7 @@ class Conductivity:
         selected_atoms, selected_qs = self.get_selected_atoms_qs(index, debug = debug)
         
         # if debug:
-        print('\n\nBuilding the currents step {}'.format(index))
+        print('\n\nBuilding the currents step {} out of {}'.format(index, self.N))
         print('Selected atoms', np.asarray(self.atoms[index].get_chemical_symbols()).ravel()[selected_atoms])
         print('Selected oxchs', selected_qs)
     
@@ -517,7 +517,8 @@ class Conductivity:
         ax.set_ylabel('$C_{JJ}(\\omega)$ [Angstrom$^{-4}$ps$^{-1}$]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
         plt.tight_layout()
-        plt.show()
+        if show_results:
+            plt.show()
         plt.close()
 
         
@@ -549,10 +550,10 @@ class Conductivity:
             
         if show_results:
             plt.show()
-            plt.close()
-            
+        plt.close()
+
+        data = {"time" : list(self.t), "sigma_t" : list(all_sigma), "delta" : smearing, 'e_V_3_kt' : e_V_3_T}
         if save_data:
-            data = {"time" : list(self.t), "sigma_t" : list(all_sigma), "delta" : smearing, 'e_V_3_kt' : e_V_3_T}
             AtomicSnapshots.save_dict_to_json(name_json_file, data)
 
         self.results = data
