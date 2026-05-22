@@ -138,7 +138,7 @@ class AnalyseMace:
         return
 
 
-    def re_plot(self, dir_comparison, dir_with_data):
+    def re_plot(self, dir_comparison, dir_with_data, atoms_path = None):
         """
         REPLOT DFT ML ENERGIES FORCES STRESSES AND COMPARE
         ===================================================
@@ -147,10 +147,19 @@ class AnalyseMace:
         
         self.load_ml_and_dft(dir_with_data)
 
-        os.mkdir(dir_comparison)
+        if not os.path.isdir(dir_comparison):
+            os.mkdir(dir_comparison)
+        
         os.chdir(dir_comparison)
         
         self.plot_compare(show = True)
+
+        if not atoms_path is None:
+            print('here')
+            print(atoms_path)
+            self.ase_atoms = ase.io.read(atoms_path, index = ':', format='extxyz')
+
+            self.plot_compare_atom_type_force(show = True)
 
         os.chdir(current_path)
             
@@ -172,10 +181,15 @@ class AnalyseMace:
         self.ml = {}
 
         for key in ["energy", "force", "stress"]:            
-            self.dft[key] = np.load(key + "_dft.npz")
-            self.ml[key]  = np.load(key + "_ml.npz")
+            self.dft[key] = np.asarray(np.load(key + "_dft.npz")["arr_0"])
+            self.ml[key]  = np.asarray(np.load(key + "_ml.npz")["arr_0"])
+        print('DONE loading')
+        print()
+        print(self.ml['force'].shape)
+        print(self.dft['force'].shape)
 
-        os.chidir(current_dir)
+        self.size_test = self.ml['force'].shape[0]
+        os.chdir(current_dir)
 
     def get_energies_forces(self):
         """
@@ -307,22 +321,37 @@ class AnalyseMace:
                 # mask = ~mask
                 # print(mask)
                 ref_rmse_f = sklearn.metrics.root_mean_squared_error(ml_forces[:,:,i], dft_forces[:,:,i])
+                ref_mae_f  = sklearn.metrics.mean_absolute_error(ml_forces[:,:,i], dft_forces[:,:,i])
                     
                 ax.plot((dft_forces[:,:,i]).ravel(), (dft_forces[:,:,i]).ravel(), color = 'grey', lw = 1, ls = ':')
                 hb = ax.hexbin((dft_forces[:,:,i]).ravel(), (ml_forces[:,:,i]).ravel(),
                                cmap = "rainbow", mincnt = 1, gridsize = self.size_test)
-                cb = fig.colorbar(hb, ax = ax)
+                cb = fig.colorbar(hb, ax = ax,  shrink=0.7, fraction=0.05, pad=0.02)
                 cb.set_label("Counts", fontsize = 12)
                 
-                ax.set_ylabel('F ML  [eV/Angstrom]', size = 12)
-                ax.set_xlabel('F DFT [eV/Angstrom]', size = 12)
+                ax.set_ylabel('Force ML  [eV/Angstrom]', size = 12)
+                ax.set_xlabel('Force DFT [eV/Angstrom]', size = 12)
                 ax.tick_params(axis = 'both', labelsize = 12)
-                ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+                # ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    
+                # Get common limits
+                xmin = min(ax.get_xlim()[0], ax.get_ylim()[0])
+                xmax = max(ax.get_xlim()[1], ax.get_ylim()[1])
+                
+                ax.set_xlim(xmin, xmax)
+                ax.set_ylim(xmin, xmax)
+                
+                # Make units equal on both axes
+                ax.set_aspect('equal', adjustable='box')
+                locator = MaxNLocator(nbins=6)
+                ax.xaxis.set_major_locator(locator)
+                ax.yaxis.set_major_locator(locator)
             
                 ax = fig.add_subplot(gs[1,i])
                 
                 ax.hist(dft_forces[:,:,i].ravel() - ml_forces[:,:,i].ravel(), color = colors[i],
-                        bins = bins, label = "RMSE={:.2e} eV/Ang".format(ref_rmse_f))
+                        bins = bins, label = "RMSE={:.2e} eV/Ang\
+                                              MAE ={:.2e} eV/Ang".format(ref_rmse_f,ref_mae_f))
                 
                 ax.set_xlabel('F DFT - F ML [eV/Angstrom]', size = 12)
                 ax.set_ylabel('Counts', size = 12)
@@ -368,8 +397,20 @@ class AnalyseMace:
         ax.set_ylabel('E ML [eV/atom]', size = 12)
         ax.set_xlabel('E DFT [eV/atom]', size = 12)
         ax.tick_params(axis = 'both', labelsize = 12)
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
-    
+        # ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+        xmin = min(ax.get_xlim()[0], ax.get_ylim()[0])
+        xmax = max(ax.get_xlim()[1], ax.get_ylim()[1])
+        
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(xmin, xmax)
+        
+        # Make units equal on both axes
+        ax.set_aspect('equal', adjustable='box')
+        locator = MaxNLocator(nbins=6)
+        ax.xaxis.set_major_locator(locator)
+        ax.yaxis.set_major_locator(locator)
+
         ax = fig.add_subplot(gs[0,1])
         ax.hist((self.dft["energy"] - self.ml["energy"]), bins = bins, label = "RMSE={:.2e} eV/atom".format(ref_rmse_e))
         ax.set_xlabel('E DFT - E ML [eV/atom]', size = 12)
@@ -402,22 +443,37 @@ class AnalyseMace:
             mask = ~mask
             # print(mask)
             ref_rmse_f = sklearn.metrics.root_mean_squared_error(self.dft["force"][:,:,i][mask], self.ml["force"][:,:,i][mask])
+            ref_mae_f  = sklearn.metrics.mean_absolute_error(self.dft["force"][:,:,i][mask], self.ml["force"][:,:,i][mask])
                 
             ax.plot((self.dft["force"][:,:,i][mask]).ravel(), (self.dft["force"][:,:,i][mask]).ravel(), color = 'grey', lw = 1, ls = ':')
             hb = ax.hexbin((self.dft["force"][:,:,i][mask]).ravel(), (self.ml["force"][:,:,i][mask]).ravel(),
                            cmap = "rainbow", mincnt = 1, gridsize = self.size_test)
-            cb = fig.colorbar(hb, ax = ax)
+            cb = fig.colorbar(hb, ax = ax,  shrink=0.7, fraction=0.05, pad=0.02)
             cb.set_label("Counts", fontsize = 12)
             
-            ax.set_ylabel('F ML  [eV/Angstrom]', size = 12)
-            ax.set_xlabel('F DFT [eV/Angstrom]', size = 12)
+            ax.set_ylabel('Force ML  [eV/Angstrom]', size = 12)
+            ax.set_xlabel('Force DFT [eV/Angstrom]', size = 12)
             ax.tick_params(axis = 'both', labelsize = 12)
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+            # ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+            # Get common limits
+            xmin = min(ax.get_xlim()[0], ax.get_ylim()[0])
+            xmax = max(ax.get_xlim()[1], ax.get_ylim()[1])
+            
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(xmin, xmax)
+            
+            # Make units equal on both axes
+            ax.set_aspect('equal', adjustable='box')
+            locator = MaxNLocator(nbins=6)
+            ax.xaxis.set_major_locator(locator)
+            ax.yaxis.set_major_locator(locator)
+            
         
             ax = fig.add_subplot(gs[1,i])
             ax.hist(self.dft["force"][:,:,i].ravel() - self.ml["force"][:,:,i].ravel(), color = colors[i],
-                    bins = bins, label = "RMSE={:.2e} eV/Ang".format(ref_rmse_f))
-            ax.set_xlabel('F DFT - F ML [eV/Angstrom]', size = 12)
+                    bins = bins, label = "RMSE={:.2e} eV/Ang\nMAE={:.2e} eV/Ang".format(ref_rmse_f, ref_mae_f))
+            ax.set_xlabel('Force DFT - ML [eV/Angstrom]', size = 12)
             ax.set_ylabel('Counts', size = 12)
             ax.tick_params(axis = 'both', labelsize = 12)
             ax.legend(fontsize = 12)
@@ -450,7 +506,19 @@ class AnalyseMace:
             ax.set_ylabel('$\\sigma$ ML  [eV/Angstrom$^{3}$]', size = 12)
             ax.set_xlabel('$\\sigma$ DFT [eV/Angstrom$^{3}$]', size = 12)
             ax.tick_params(axis = 'both', labelsize = 12)
-            ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+            # ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+
+            xmin = min(ax.get_xlim()[0], ax.get_ylim()[0])
+            xmax = max(ax.get_xlim()[1], ax.get_ylim()[1])
+            
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(xmin, xmax)
+            
+            # Make units equal on both axes
+            ax.set_aspect('equal', adjustable='box')
+            locator = MaxNLocator(nbins=4)
+            ax.xaxis.set_major_locator(locator)
+            ax.yaxis.set_major_locator(locator)
         
             ax = fig.add_subplot(gs[1,i])
             ax.hist(self.dft["stress"][:,i,i].ravel() - self.ml["stress"][:,i,i].ravel(), color = colors[i],

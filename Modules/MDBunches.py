@@ -1,5 +1,5 @@
 import numpy as np
-
+import warnings
 import ase
 from ase import Atoms
 
@@ -94,8 +94,11 @@ module load cp2k/2024.3\n
         ########
         # CP2k #
         ########
+        # TO DO ADD THE POSSIBILITY OF A GEO_OPT 
         # Create the dictionary
-        self.cp2k_dict = {# TYPE OF CALC
+        self.cp2k_dict = {# MD GEO_OPT
+                          # "_MODE_" : "MD",
+                          # TYPE OF MD
                           "_CALCTYPE_" : "NVT", 
                           # SYSTEM NAME IN CP2k
                           "_SYSTEM_" : "brines",
@@ -107,7 +110,7 @@ module load cp2k/2024.3\n
                           "_BASIS_POT_PATH_" :  "/ccc/work/cont003/gen2309/sicilana/DATA_CP2K",
                           # VDW INTERACTION, VDW FUNCTIONAL and WHICH ATOM TO EXCLUDE FROM VDW
                           "_VDW_" : 1, "_VWD3_FUNCTIONAL_" : None, "_VWD3_EXCLUDE_ATOM_" : None,
-                          "_RCvdw_" : 12, 
+                          "_RCvdw_" : 15, 
                           # THE SMOOTHING OF THE DENSITY
                           "_USE_SMOOTH_" : 1, "_XC_SMOOTH_RHO_" : "NN50", "_XC_DERIV_" :  "NN50_SMOOTH",
                           # CUTOFF in RYDBERG AND NUMBER OF GRIDS
@@ -169,9 +172,11 @@ module load cp2k/2024.3\n
 
         # Check for compatibility
         if len(cp2k_dict)    != len(self.cp2k_dict):
+            missing_keys(cp2k_dict, self.cp2k_dict)
             raise ValueError('The two cp2k dictionaries do not match')
 
         if len(cluster_dict) != len(self.cluster_dict):
+            missing_keys(cluster_dict, self.cluster_dict)
             raise ValueError('The two cluster dictionaries do not match')
 
         # Check consistency between the keys
@@ -189,11 +194,13 @@ module load cp2k/2024.3\n
 
         self.cluster_dict = copy.deepcopy(cluster_dict)
 
+        # if self.cp2k_dict['_MODE_'] == 'MD':
         if "NPT" in self.cp2k_dict["_CALCTYPE_"] and bool(self.cp2k_dict["_USE_SMOOTH_"]):
             raise ValueError("The smoothing procedure to get the pressure should be tested")
 
         if "NVT" in self.cp2k_dict["_CALCTYPE_"] and not bool(self.cp2k_dict["_USE_SMOOTH_"]):
-            raise ValueError("In NVT considering the smoothing procedure")
+            # raise Warning("In NVT considering the smoothing procedure")
+            warnings.warn("In NVT considering the smoothing procedure", DeprecationWarning)
 
         # Check that the CP2k functional and the parameterization of the VDW are consistent
         # Otherwis an erro wil be raised
@@ -202,6 +209,7 @@ module load cp2k/2024.3\n
         if "PARAMETRIZATION" in self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split():
             index = self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split().index("PARAMETRIZATION")
             dft_functional_used = self.cp2k_dict["_CP2K_XC_FUNCTIONAL_"].split()[index + 1]
+            
         if self.cp2k_dict["_VWD3_FUNCTIONAL_"] != dft_functional_used:
             raise ValueError("The DFT xc is {} whereas the D3 parametrization is {}".format(dft_functional_used, self.cp2k_dict["_VWD3_FUNCTIONAL_"]))
 
@@ -220,6 +228,9 @@ module load cp2k/2024.3\n
         CREATE THE INPUT FOR NPT SIMULATIONS in CP2K
         """
         
+        
+        
+
         input_text = """@SET RESTART        _RESTART_
 
 @SET BASIS_POT_PATH _BASIS_POT_PATH_
@@ -302,7 +313,7 @@ module load cp2k/2024.3\n
           VERBOSE_OUTPUT .TRUE.
           REFERENCE_FUNCTIONAL _VWD3_FUNCTIONAL_
           R_CUTOFF [angstrom] _RCvdw_ # def=10 angstrom 
-          D3_EXCLUDE_KIND _VWD3_EXCLUDE_ATOM_ # Exclude the Na atom type 3
+          _LINEVWD3_EXCLUDE_ATOM_  # IF WE WANT TO EXCLUDE ATOMS Exclude the Na atom type 3
         &END PAIR_POTENTIAL
       &END vdW_POTENTIAL
       @ENDIF
@@ -354,6 +365,20 @@ module load cp2k/2024.3\n
 &END FORCE_EVAL
 
 &MOTION
+  &GEO_OPT
+    TYPE MINIMIZATION 
+    MAX_DR    1.0E-03 # BOHR
+    MAX_FORCE 1.0E-02 # HA/BOHR
+    RMS_DR    1.0E-03 # BOHR
+    RMS_FORCE 1.0E-02 # HA/BOHR
+    MAX_ITER _STEPS_  # Number of iterations
+    OPTIMIZER CG
+    &CG
+     MAX_STEEP_STEPS  0    # NO SD steps
+     RESTART_LIMIT 9.0E-01 # Condition on doing a SD step
+    &END CG
+  &END GEO_OPT
+  
   &MD
     ENSEMBLE      _CALCTYPE_
     STEPS             _STEPS_
@@ -387,10 +412,10 @@ module load cp2k/2024.3\n
     &END FORCES
 
     &VELOCITIES SILENT
-    	FILENAME =${SYSTEM}-1.vel
-        &EACH
-            MD 1
-        &END EACH
+      FILENAME =${SYSTEM}-1.vel
+      &EACH
+        MD 1
+      &END EACH
     &END VELOCITIES
 
     &CELL  SILENT
@@ -401,10 +426,10 @@ module load cp2k/2024.3\n
     &END CELL
 
     &STRESS SILENT
-    	FILENAME =${SYSTEM}-1.stress
-        &EACH
-            MD 1
-        &END EACH
+      FILENAME =${SYSTEM}-1.stress
+      &EACH
+        MD 1
+      &END EACH
     &END STRESS
     
     &RESTART
@@ -438,15 +463,30 @@ module load cp2k/2024.3\n
 
         def is_all_upper(s):
             return s.isupper() and len(s) > 0
+        
+        # Prepare the extra line for excluding atoms type in the vdw
+        if dictionary["_VWD3_EXCLUDE_ATOM_"] is None:
+            VDW_EXCLUDE_LINE = ""
+        else:
+            if type(dictionary["_VWD3_EXCLUDE_ATOM_"]) == list:
+                atoms_to_be_excluded = ' '.join(map(str, dictionary["_VWD3_EXCLUDE_ATOM_"]))
+                VDW_EXCLUDE_LINE = "D3_EXCLUDE_KIND {}".format(atoms_to_be_excluded)
+            else:
+                VDW_EXCLUDE_LINE = "D3_EXCLUDE_KIND {}".format(dictionary["_VWD3_EXCLUDE_ATOM_"])
+
         print("\nCREATING INPUT")
         for key, value in dictionary.items():
             # if is_all_upper(key):
             print(f"{key} => {value}")
             pre_input_text = copy.deepcopy(input_text)
-            input_text = input_text.replace(key, "{}".format(value))
+            if key == "_VWD3_EXCLUDE_ATOM_":
+                input_text = input_text.replace("_LINEVWD3_EXCLUDE_ATOM_", VDW_EXCLUDE_LINE)
+            else:
+                input_text = input_text.replace(key, "{}".format(value))
             # print(input_text == pre_input_text)
             # print(input_text)
-            if input_text == pre_input_text and not(key in ["_full_RES_FILE_"]):
+            # Check if the input has changed 
+            if input_text == pre_input_text and not(key in ["_full_RES_FILE_", "_VWD3_EXCLUDE_ATOM_"]):
                 raise ValueError("KEY {} NOT FOUND, please check the text of the cp2k calculation".format(key))
 
         
@@ -534,14 +574,24 @@ module load cp2k/2024.3\n
         for batch in range(self.n_batches_min, (self.n_batches + self.n_batches_min) ):
         
             # The execution directory
-            execution_dir =  "BATCH_{:d}_MD_T_{:d}_steps_{:d}_dt_{:.1f}_".format(batch, self.cp2k_dict["_TEMPERATURE_"],
-                                                                                 self.cp2k_dict["_STEPS_"],
-                                                                                 self.cp2k_dict["_TIMESTEP_"])
-            if self.cp2k_dict["_CALCTYPE_"] == "NPT_I":
+            # if self.cp2k_dict["_MODE_"] == 'MD':
+            if self.cp2k_dict["_CALCTYPE_"] == "NVT":
+                execution_dir =  "BATCH_{:d}_MD_T_{:d}_steps_{:d}_dt_{:.1f}_".format(batch, self.cp2k_dict["_TEMPERATURE_"],
+                                                                                     self.cp2k_dict["_STEPS_"],
+                                                                                     self.cp2k_dict["_TIMESTEP_"])
+            elif self.cp2k_dict["_CALCTYPE_"] == "NPT_I":
                 execution_dir =  "BATCH_{:d}_MD_T_{:d}_P_{:d}_steps_{:d}_dt_{:.1f}_".format(batch, self.cp2k_dict["_TEMPERATURE_"],
                                                                                             self.cp2k_dict["_PRESSURE_"],
                                                                                             self.cp2k_dict["_STEPS_"],
                                                                                             self.cp2k_dict["_TIMESTEP_"])
+            else:
+                raise ValueError("self.cp2k_dict[_CALCTYPE_] should be either NVT or NPT_I")
+                    
+            # elif self.cp2k_dict["_MODE_"] == 'GEO_OPT':
+            #     execution_dir =  "BATCH_{:d}_GEO_OPT_steps_{:d}__".format(batch, self.cp2k_dict["_STEPS_"])
+            
+            # else:
+            #     raise ValueError("self.cp2k_dict[_MODE_] should be either GEO_OPT or MD")
                 
             # Add the structure file without the extension
             execution_dir += os.path.basename(self.structure_file)[:-4] 
@@ -743,28 +793,27 @@ module load cp2k/2024.3\n
         
         file = open("run.sh", "w")
         
-        file.write("""
-#!/bin/bash
-#MSUB -r {}_{:d}
+        file.write("""#!/bin/bash
+#MSUB -r {}_{}
 #MSUB -q {}   #rome has 128 prc per node, skylake has 48
-#MSUB -N {:d}
-#MSUB -n {:d}
+#MSUB -N {}
+#MSUB -n {}
 #MSUB -m scratch
 #MSUB -x
 #MSUB -E '--no-requeue'
 #MSUB -Q {}    #normal or long
-#MSUB -T {:d}   
+#MSUB -T {}   
 #MSUB -A {}
 set -x
         
 {}
         
-""".format(self.cluster_dict["job_name"], batch_index,
+""".format(self.cluster_dict["job_name"], int(batch_index),
                    self.cluster_dict["partition_name"],
-                   self.cluster_dict["nnodes"],
-                   self.cluster_dict["ncpus"], 
+                   int(self.cluster_dict["nnodes"]),
+                   int(self.cluster_dict["ncpus"]), 
                    myQOS,
-                   self.cluster_dict["time"],
+                   int(self.cluster_dict["time"]),
                    self.cluster_dict["account"],
                    self.cluster_dict["module_load"]))
         
@@ -785,24 +834,119 @@ cd {}
     
 """.format(os.path.join(self.cluster_dict["cluster_scratch"], execution_dir),
                self.cluster_dict["mpirun"],  self.cluster_dict["exe"], myfile))
-    
-        if batch_index > 0:
-            final_dir  = execution_dir.replace("BATCH_{}".format(batch_index), "BATCH_{}".format(batch_index + 1))
-            final_path = os.path.join(self.cluster_dict["cluster_scratch"], final_dir)
-            file.write("cp ./{}-1.restart {}\n\n".format(self.cp2k_dict["_SYSTEM_"], os.path.join(final_path, self.cp2k_dict["_RES_FILE_"])))
 
-            # TODO Add a check on the convergence of the SCF caclcualtion
-            # Go in the next directory and run the new job
-            file.write("cd {}\n".format(final_path))
-            # Chagne the restart
-            file.write("chmod g+s ./*\n")
-            file.write("{} run.sh\n".format(self.cluster_dict['run_job']))
+
+        if batch_index > 0:
+            final_dir = execution_dir.replace("BATCH_{}".format(batch_index), "BATCH_{}".format(batch_index + 1))
+            final_path = os.path.join(self.cluster_dict["cluster_scratch"], final_dir)
+            # check on the convergence of the SCF caclculation with if
+            # If converged, Go in the next directory and run the new job
+            # Change the restart
+            file.write("""
+if grep -q "SCF run NOT" output.out || grep -q "ABORT" output.out; then
+                       echo 'WARNING : run not converged or job aborted
+                       Next job cancelled'
+else
+                       cp ./{}-1.restart {}
+
+                       cd {}
+                       chmod g+s ./*
+                       {} run.sh
+fi
+                """.format(self.cp2k_dict["_SYSTEM_"], os.path.join(final_path, self.cp2k_dict["_RES_FILE_"]), final_path, self.cluster_dict['run_job']))
+
+        file.close()
+
+
+
+
+
+
+
+    def create_run_file_sbatch(self, batch_index, execution_dir):
+        """
+        CREATES THE RUN.SH FILE
+        =======================
+
+        Should work for SBATCH scheduling system
+
+        Parameters:
+        -----------
+            -batch_index: int used as label for the job name and for submitting the next batch calculation, -1 if it is the last batch to submit
+            -execution_dir: the dir containing the run.sh file and all the inputs needed by cp2k
+        """
         
+        file = open("run.sh", "w")
         
+        file.write("""#!/bin/bash
+#SBATCH -J {}_{}
+#   #SBATCH -q {}   #rome has 128 prc per node, skylake has 48
+#SBATCH -N {}
+#SBATCH -n {}
+#SBATCH -c 1
+#    #SBATCH -x
+#SBATCH --exclusive --no-requeue
+#SBATCH --partition={}    
+#SBATCH --time={}   
+#SBATCH -A {}
+set -x
+        
+{}
+        
+""".format(self.cluster_dict["job_name"], int(batch_index),
+           self.cluster_dict["partition_name"],
+           self.cluster_dict["nnodes"],
+           self.cluster_dict["ncpus"], 
+           self.cluster_dict["partition_name"],
+           self.cluster_dict["time"],
+           self.cluster_dict["account"],
+           self.cluster_dict["module_load"]))
+        
+        # TODO ADD the possibility of not using minus x and no requeue
+        if not self.cluster_dict["minus_x"]:
+            raise ValueError("CLUSTER| The minus x option should be true")
+
+        if not self.cluster_dict["no_requeue"]:
+            raise ValueError("CLUSTER| The no requeue option should be true")
+        
+        allfiles = os.listdir("./")
+        for myfile in allfiles:
+            if myfile.endswith(".inp"):
+                print("CLUSTER| You are running {} \n".format(myfile))
+                file.write("""
+cd {}
+{} {} -i {} -o output.out
+    
+""".format(os.path.join(self.cluster_dict["cluster_scratch"], execution_dir),
+           self.cluster_dict["mpirun"], self.cluster_dict["exe"], myfile))
+
+
+        if batch_index > 0:
+            final_dir = execution_dir.replace("BATCH_{}".format(batch_index), "BATCH_{}".format(batch_index + 1))
+            final_path = os.path.join(self.cluster_dict["cluster_scratch"], final_dir)
+            # check on the convergence of the SCF caclculation with if
+            # If converged, Go in the next directory and run the new job
+            # Change the restart
+            file.write("""
+if grep -q "SCF run NOT" output.out || grep -q "ABORT" output.out; then
+    echo 'WARNING : run not converged or job aborted
+    Next job cancelled'
+else
+    cp ./{}-1.restart {}
+    cd {}
+    chmod g+s ./*
+    {} run.sh
+fi
+            """.format(self.cp2k_dict["_SYSTEM_"], os.path.join(final_path, self.cp2k_dict["_RES_FILE_"]), final_path, self.cluster_dict['run_job']))
+
         file.close()
     
 
-
+def missing_keys(A, B):
+    print('\nKeys missing')
+    print(set(B.keys()) - set(A.keys()))
+    print()
+    return
 
 def save_dict_to_json(json_file_name, my_dict):
     """

@@ -90,7 +90,7 @@ class CavityAnalysis:
 
 
 
-    def run_find_cavities(self, processors = 1, size = 1, debug = False, current_path = None, atoms_types = ['O']):
+    def run_find_cavities(self, processors = 1, size = 2, distance = -1, debug = False, current_path = None, atoms_types = ['O']):
         """
         RUN THE FIND CAVITIES SCRIPT
         ============================
@@ -103,6 +103,7 @@ class CavityAnalysis:
         -----------
             -processors: int, the number of processors on which we run
             -size: float, the radius of the bubbles in ANGTROM
+            -distance: float, the distance between the bubbles in ANGTROM
             -debug: bool, if True the python script called will output many informations 
             -atms_types: list of str, a list with the atoms types that we DO NOT want into the cavity
         """
@@ -119,7 +120,7 @@ class CavityAnalysis:
                    "{}".format(self.path_to_ase_atoms), 
                    # "{}".format(self.path_to_cells),
                    "{}".format(self.calc_type),
-                   "{}".format(size), "{}".format(current_path), "{}".format(int(debug))]
+                   "{}".format(size), "{}".format(distance), "{}".format(current_path), "{}".format(int(debug))]
 
         for at in atoms_types:
             command.append(at)

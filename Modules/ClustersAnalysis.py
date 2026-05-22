@@ -132,7 +132,7 @@ class ClusterAnalysis:
 
 
 
-    def run_analysis_cluster(self, dt = 0.5, debug = False):
+    def run_analysis_cluster(self, dt = 0.5, debug = False, zombie_steps = 500):
         """
         RUN THE CLUSTERING ANALYSIS SCRIPT
         ==================================
@@ -146,7 +146,8 @@ class ClusterAnalysis:
         # print(
         # Command as a list of strings
         command = [ "python3", self.path_to_analysis_script, "{}".format(self.path_to_result_dir),
-                   "{}".format(self.types[0]) , "{}".format(self.types[1]), "{}".format(dt), "{}".format(int(debug))]
+                   "{}".format(self.types[0]) , "{}".format(self.types[1]), "{}".format(dt), "{}".format(int(debug)),
+                   "{:.0f}".format(zombie_steps)]
         
         # Run the command
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)

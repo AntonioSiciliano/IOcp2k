@@ -177,6 +177,7 @@ class AtomicSnapshots:
 
     def init_from_lammps(self, file_dump_lammps, file_log_lammps, dt = 0.5, atomic_types = ["A", "B"],
                          read_forces = True,
+                         read_velocities = True,
                          create_ase_atoms = False, wrap_ase_pos = False,
                          subtract_com_ase = False, subtract_com_vel_ase = False, ase_pbc = [True, True, True],
                          max_snapshots = None,
@@ -215,6 +216,7 @@ class AtomicSnapshots:
             -dt: float, the time step between the snapshots
             -atomic_types: list, the atomic species included in the simulation
             -read_forces: bool, set it to False to optimize the memory consumption
+            -read_velocities: bool,
             -create_ase_atoms: float, if True we create also the ase atoms object
             -wrap_ase_pos:
             -ase_pbc: list of bool
@@ -327,12 +329,12 @@ class AtomicSnapshots:
             if verbose:
                 print("The snapshots found are {} = {:.1f} ps\n".format(self.snapshots, self.snapshots * dt * 1e-3))
         
-        self.kinetic_energies   = np.asarray(self.kinetic_energies[:self.snapshots]) * HA_TO_EV**-1
-        self.potential_energies = np.asarray(self.potential_energies[:self.snapshots]) * HA_TO_EV**-1
+        self.kinetic_energies   = np.asarray(self.kinetic_energies[:self.snapshots], dtype = type_def) * type_def(HA_TO_EV**-1)
+        self.potential_energies = np.asarray(self.potential_energies[:self.snapshots], dtype = type_def) * type_def(HA_TO_EV**-1)
         self.energies           = self.kinetic_energies + self.potential_energies
-        self.temperatures       = np.asarray(self.temperatures[:self.snapshots]) 
-        self.pressures          = np.asarray(self.pressures[:self.snapshots]) * BAR_TO_HA_BOHR3
-        self.densities          = np.asarray(self.densities[:self.snapshots])
+        self.temperatures       = np.asarray(self.temperatures[:self.snapshots], dtype = type_def) 
+        self.pressures          = np.asarray(self.pressures[:self.snapshots] , dtype = type_def) * type_def(BAR_TO_HA_BOHR3)
+        self.densities          = np.asarray(self.densities[:self.snapshots], dtype = type_def)
         self.cons_quant = np.zeros(self.snapshots, dtype = type_def)
 
         if verbose:
@@ -362,6 +364,7 @@ class AtomicSnapshots:
             print("=========== Reading custom LAMMPS file (positions, velocities, forces) in metal units... ===========")
             print("The file is {} in {}".format(file_dump_lammps, os.getcwd()))
             print("Are we reading the forces? {}".format(read_forces))
+            print("Are we reading the velocities? {}".format(read_velocities))
             print("ASE ATOMS | Are we creating the atoms? {} Wrapping positions? {} PBC {}".format(create_ase_atoms, wrap_ase_pos, ase_pbc))
             print("We will read {} snapshopts for a total time of {:.2f} ps".format(self.snapshots, self.snapshots * self.dt * 1e-3))
             print()
@@ -435,7 +438,10 @@ class AtomicSnapshots:
                     types = [types_to_atoms[item] for item in arrays[:,1]]
                     # Get positions, velocities and forces
                     positions   = arrays[:, 2:5] - shift   # Angstrom
-                    velocities  = arrays[:, 5:8]           # Angstrom/ps
+                    if read_velocities:
+                        velocities  = arrays[:, 5:8]           # Angstrom/ps
+                    else:
+                        velocities = None
                     if read_forces:
                         forces = arrays[:, 8:11]           # eV/Angstrom
                     else:
@@ -448,14 +454,14 @@ class AtomicSnapshots:
                     self.unit_cells.append(cell)
 
                   
-                    
-                    # BOHR/AU TIME
-                    self.velocities.append(velocities * ANGSTROM_TO_BOHR /AU_TIME_TO_PICOSEC**-1)
+                    if read_velocities:
+                        # BOHR/AU TIME
+                        self.velocities.append(velocities * ANGSTROM_TO_BOHR /AU_TIME_TO_PICOSEC**-1)
                     # FORCES in HA/BOHR
                     if read_forces:
                         self.forces.append(forces * HA_TO_EV**-1 /ANGSTROM_TO_BOHR)
                     
-                    # Check the type connsistency
+                    # Check the type consistency
                     if id_snap > 1:
                         if types != self.types:
                             raise ValueError("The types have changed {}".format(types))
@@ -466,8 +472,9 @@ class AtomicSnapshots:
                         # Create the ase atoms uisng eV, Angstrom and ps
                         structure = ase.atoms.Atoms(types, positions, cell = cell, pbc = ase_pbc)
                         structure.set_cell(cell)
-                        # ANGSTROM/PICOSEC
-                        structure.set_velocities(velocities)
+                        if read_velocities:
+                            # ANGSTROM/PICOSEC
+                            structure.set_velocities(velocities)
                         
                         if subtract_com_ase:
                             masses = [ase.data.atomic_masses[ase.data.atomic_numbers[s]] for s in types]
@@ -480,12 +487,18 @@ class AtomicSnapshots:
                         # if subtract_com_vel_ase:
                         #     structure.velocities -= np.einsum('a, ab -> b', masses, structure.get_velocities()) /np.sum(masses)
                         # Now set the calculator so that we have energies and forces
-                        calculator = ase.calculators.singlepoint.SinglePointCalculator(structure,
-                                                                                       # watch out for the -1 convention EV
-                                                                                       energy = self.energies[id_snap-1] * HA_TO_EV, 
-                                                                                       # EV/ANGSTROM
-                                                                                       forces = forces,
-                                                                                       stress = np.zeros(6))
+                        if read_forces:
+                            calculator = ase.calculators.singlepoint.SinglePointCalculator(structure,
+                                                                                           # watch out for the -1 convention EV
+                                                                                           energy = self.energies[id_snap-1] * HA_TO_EV, 
+                                                                                           # EV/ANGSTROM
+                                                                                           forces = forces,
+                                                                                           stress = np.zeros(6))
+                        else:
+                            calculator = ase.calculators.singlepoint.SinglePointCalculator(structure,
+                                                                                           # watch out for the -1 convention EV
+                                                                                           energy = self.energies[id_snap-1] * HA_TO_EV,
+                                                                                           stress = np.zeros(6))
                         # Attach the calculator
                         structure.calc = calculator
                         
@@ -526,10 +539,11 @@ class AtomicSnapshots:
             self.forces     = None
         # Unit cells ANGSTROM  each row has a unit cell vector
         self.unit_cells = np.asarray(self.unit_cells).reshape((self.snapshots, 3, 3))
-        # Velocities BOHR/AU TIME
-        self.velocities = np.asarray(self.velocities).reshape((self.snapshots, self.N_atoms, 3)) 
+        if read_velocities:
+            # Velocities BOHR/AU TIME
+            self.velocities = np.asarray(self.velocities).reshape((self.snapshots, self.N_atoms, 3)) 
         # Init the stresses HA/BOHR3
-        self.stresses   = np.zeros((self.snapshots, 3, 3))
+        self.stresses   = np.zeros((self.snapshots, 3, 3), dtype = type_def)
 
 
         # Check consistency
@@ -918,15 +932,17 @@ class AtomicSnapshots:
             if energy == 0. or energy is None:
                 raise ValueError("The energies are zero or not setted")
 
-            if not self.forces is None:
-                forces     = self.forces[isnap,:,:] * HA_BOHR_TO_EV_ANGSTROM
-                if np.all(forces == np.zeros((self.N_atoms,3))):
-                    raise ValueError("The forces are zero")
-            else:
-                forces = None
+            if write_forces:
+                if not self.forces is None:
+                    forces     = self.forces[isnap,:,:] * HA_BOHR_TO_EV_ANGSTROM
+                    if np.all(forces == np.zeros((self.N_atoms,3))):
+                        raise ValueError("The forces are zero")
+                else:
+                    forces = None
             
             stress     = -transform_voigt(self.stresses[isnap,:,:]) * HA_BOHR3_TO_EV_ANGSTROM3
-            velocities = self.velocities[isnap,:,:] * BOHR_TO_ANGSTROM /AU_TIME_TO_PICOSEC
+            if write_velocities:
+                velocities = self.velocities[isnap,:,:] * BOHR_TO_ANGSTROM /AU_TIME_TO_PICOSEC
 
             if subtract_com:
                 positions = np.copy(self.positions[isnap,:,:] - R_com[isnap,:])
